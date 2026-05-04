@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Channel Guard</string>
+    <string name="accessibility_service_label">YouTube Channel Guard</string>
+    <string name="accessibility_service_summary">Allows watching YouTube only from approved channels</string>
+    <string name="accessibility_service_description">Watches the YouTube app and blocks playback from channels you have not added to your allow-list. Requires read access to the YouTube app\'s on-screen content so it can detect the current channel name.</string>
+
+    <string name="notif_channel_id">guard_running</string>
+    <string name="notif_channel_name">Guard service</string>
+    <string name="notif_title">Channel Guard active</string>
+    <string name="notif_text">Watching YouTube usage</string>
+
+    <string name="block_title">Channel not allowed</string>
+    <string name="block_subtitle">This video is from a channel that isn\'t on your allow-list.</string>
+    <string name="block_dismiss">Dismiss</string>
+</resources>
