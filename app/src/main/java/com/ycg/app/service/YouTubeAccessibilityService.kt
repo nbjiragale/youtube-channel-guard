@@ -14,8 +14,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -76,14 +74,10 @@ class YouTubeAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        // Hot state-flow keeps the latest allow-list in memory so we don't
-        // touch DataStore on every event.
+        // Keep the latest allow-list in memory so we don't hit DataStore on
+        // every accessibility event.
         collectorJob = scope.launch {
-            allowList.allowedChannels.stateIn(
-                scope = this@launch.let { CoroutineScope(it.coroutineContext) },
-                started = SharingStarted.Eagerly,
-                initialValue = emptySet()
-            ).collect { allowListState.value = it }
+            allowList.allowedChannels.collect { allowListState.value = it }
         }
         // Start the foreground status notification.
         val intent = Intent(this, GuardForegroundService::class.java)
