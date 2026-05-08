@@ -164,6 +164,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            item { LockdownStatusBanner() }
             item {
                 if (permissions.allGranted) {
                     GuardStatusBanner(

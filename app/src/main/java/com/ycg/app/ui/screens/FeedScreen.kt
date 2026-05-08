@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -77,98 +78,95 @@ fun FeedScreen(viewModel: FeedViewModel = viewModel()) {
             )
         }
     ) { padding ->
-        when (val s = state) {
-            FeedViewModel.State.Loading,
-            FeedViewModel.State.Idle -> CenteredSpinner(padding)
-
-            is FeedViewModel.State.Loaded -> {
-                if (s.videos.isEmpty()) {
-                    EmptyMessage(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding),
-                        icon = Icons.Outlined.Shield,
-                        title = "No videos yet",
-                        body = "Your allowed channels haven't uploaded anything " +
-                            "we can see. Pull to refresh."
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding),
-                        contentPadding = PaddingValues(
-                            start = 16.dp, end = 16.dp,
-                            top = 12.dp, bottom = 32.dp
-                        ),
-                        verticalArrangement = Arrangement.spacedBy(20.dp)
-                    ) {
-                        items(s.videos, key = { it.videoId }) { video ->
-                            VideoCard(
-                                video = video,
-                                onClick = {
-                                    openInYouTube(context, video.videoId, video.watchUrl)
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-
-            is FeedViewModel.State.Empty -> when (s.reason) {
-                FeedViewModel.State.Reason.NoApiKey -> EmptyMessage(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding),
-                    icon = Icons.Outlined.WifiTetheringError,
-                    title = "API key not configured",
-                    body = "Add your YouTube Data API key to local.properties as " +
-                        "youtube.api.key=YOUR_KEY and rebuild. The feed needs the " +
-                        "API to fetch uploads from your allowed channels.",
-                    cta = null
-                )
-                FeedViewModel.State.Reason.NoChannels -> EmptyMessage(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding),
-                    icon = Icons.Outlined.Shield,
-                    title = "No channels yet",
-                    body = "Add at least one channel on the Channels tab and the " +
-                        "feed will populate with their latest uploads.",
-                    cta = null
-                )
-                FeedViewModel.State.Reason.AllUnresolved -> EmptyMessage(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding),
-                    icon = Icons.Outlined.WifiTetheringError,
-                    title = "Couldn't look up your channels",
-                    body = "We have channels in your list, but resolving them via " +
-                        "the YouTube API hasn't worked. Check your API key and " +
-                        "internet connection, then refresh.",
-                    cta = "Retry" to { viewModel.refresh() }
-                )
-            }
-
-            is FeedViewModel.State.Error -> EmptyMessage(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                icon = Icons.Outlined.WifiTetheringError,
-                title = "Couldn't refresh feed",
-                body = s.message,
-                cta = "Retry" to { viewModel.refresh() }
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            LockdownStatusBanner()
+            FeedBody(
+                state = state,
+                onOpen = { openInYouTube(context, it.videoId, it.watchUrl) },
+                onRetry = { viewModel.refresh() }
             )
         }
     }
 }
 
 @Composable
-private fun CenteredSpinner(padding: PaddingValues) {
+private fun ColumnScope.FeedBody(
+    state: FeedViewModel.State,
+    onOpen: (FeedVideo) -> Unit,
+    onRetry: () -> Unit
+) {
+    when (val s = state) {
+        FeedViewModel.State.Loading,
+        FeedViewModel.State.Idle -> CenteredSpinner()
+
+        is FeedViewModel.State.Loaded -> {
+            if (s.videos.isEmpty()) {
+                EmptyMessage(
+                    modifier = Modifier.fillMaxSize(),
+                    icon = Icons.Outlined.Shield,
+                    title = "No videos yet",
+                    body = "Your allowed channels haven't uploaded anything " +
+                        "we can see. Pull to refresh."
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 16.dp, end = 16.dp,
+                        top = 12.dp, bottom = 32.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(20.dp)
+                ) {
+                    items(s.videos, key = { it.videoId }) { video ->
+                        VideoCard(video = video, onClick = { onOpen(video) })
+                    }
+                }
+            }
+        }
+
+        is FeedViewModel.State.Empty -> when (s.reason) {
+            FeedViewModel.State.Reason.NoApiKey -> EmptyMessage(
+                modifier = Modifier.fillMaxSize(),
+                icon = Icons.Outlined.WifiTetheringError,
+                title = "API key not configured",
+                body = "Add your YouTube Data API key to local.properties as " +
+                    "youtube.api.key=YOUR_KEY and rebuild. The feed needs the " +
+                    "API to fetch uploads from your allowed channels.",
+                cta = null
+            )
+            FeedViewModel.State.Reason.NoChannels -> EmptyMessage(
+                modifier = Modifier.fillMaxSize(),
+                icon = Icons.Outlined.Shield,
+                title = "No channels yet",
+                body = "Add at least one channel on the Channels tab and the " +
+                    "feed will populate with their latest uploads.",
+                cta = null
+            )
+            FeedViewModel.State.Reason.AllUnresolved -> EmptyMessage(
+                modifier = Modifier.fillMaxSize(),
+                icon = Icons.Outlined.WifiTetheringError,
+                title = "Couldn't look up your channels",
+                body = "We have channels in your list, but resolving them via " +
+                    "the YouTube API hasn't worked. Check your API key and " +
+                    "internet connection, then refresh.",
+                cta = "Retry" to onRetry
+            )
+        }
+
+        is FeedViewModel.State.Error -> EmptyMessage(
+            modifier = Modifier.fillMaxSize(),
+            icon = Icons.Outlined.WifiTetheringError,
+            title = "Couldn't refresh feed",
+            body = s.message,
+            cta = "Retry" to onRetry
+        )
+    }
+}
+
+@Composable
+private fun CenteredSpinner() {
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(padding),
+        modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
         CircularProgressIndicator()

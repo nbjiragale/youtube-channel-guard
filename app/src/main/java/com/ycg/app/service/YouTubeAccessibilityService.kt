@@ -15,12 +15,17 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import com.ycg.app.data.AllowListMatcher
 import com.ycg.app.data.AllowListRepository
+import com.ycg.app.data.LockdownEngine
+import com.ycg.app.data.LockdownRepository
+import com.ycg.app.data.LockdownWindow
 import com.ycg.app.overlay.SmallBlockOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /**
  * Watches the YouTube app's accessibility tree, decides whether the currently
@@ -55,6 +60,9 @@ class YouTubeAccessibilityService : AccessibilityService() {
         private const val MIN_EVAL_INTERVAL_MS = 600L
         private const val POST_BLOCK_COOLDOWN_MS = 2_500L
 
+        private val TIME_FORMAT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("h:mm a")
+
         @Volatile
         private var instance: YouTubeAccessibilityService? = null
 
@@ -64,9 +72,12 @@ class YouTubeAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO)
     private lateinit var allowList: AllowListRepository
+    private lateinit var lockdown: LockdownRepository
     private lateinit var overlay: SmallBlockOverlay
     private val allowListState = MutableStateFlow<Set<String>>(emptySet())
+    private val lockdownState = MutableStateFlow<List<LockdownWindow>>(emptyList())
     private var collectorJob: Job? = null
+    private var lockdownCollectorJob: Job? = null
 
     private var lastEvalAt = 0L
     private var lastBlockAt = 0L
@@ -76,6 +87,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         allowList = AllowListRepository(applicationContext)
+        lockdown = LockdownRepository(applicationContext)
         overlay = SmallBlockOverlay(applicationContext)
     }
 
@@ -84,6 +96,9 @@ class YouTubeAccessibilityService : AccessibilityService() {
         instance = this
         collectorJob = scope.launch {
             allowList.allowedNames.collect { allowListState.value = it }
+        }
+        lockdownCollectorJob = scope.launch {
+            lockdown.windows.collect { lockdownState.value = it }
         }
         startService(Intent(this, GuardForegroundService::class.java))
         Log.i(TAG, "Accessibility service connected")
@@ -114,6 +129,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         collectorJob?.cancel()
+        lockdownCollectorJob?.cancel()
         overlay.hide()
         overlayUp = false
         super.onDestroy()
@@ -139,9 +155,47 @@ class YouTubeAccessibilityService : AccessibilityService() {
         }
         lastDecisionChannel = detected
 
+        // Lockdown takes precedence over the allow-list — when inside a
+        // window, EVERY video is blocked, even from allowed channels.
+        val activeLockdown =
+            LockdownEngine.activeWindow(LocalDateTime.now(), lockdownState.value)
+        if (activeLockdown != null) {
+            triggerLockdownBlock(activeLockdown)
+            return
+        }
+
         if (AllowListMatcher.isAllowed(detected, allowListState.value)) return
 
         triggerBlock(detected)
+    }
+
+    private fun triggerLockdownBlock(window: LockdownWindow) {
+        lastBlockAt = SystemClock.uptimeMillis()
+        Log.i(TAG, "Lockdown active — blocking. label='${window.label}'")
+
+        sendMediaPause()
+
+        val canOverlay = Settings.canDrawOverlays(applicationContext)
+        if (canOverlay) {
+            val now = LocalDateTime.now()
+            val labelText = window.label.ifBlank {
+                if (window.crossesMidnight) "Sleep" else "Lockdown"
+            }
+            val endTime = window.endAt(now).toLocalTime()
+            val subtitle = "$labelText until ${TIME_FORMAT.format(endTime)}"
+            val attached = overlay.showLockdown(
+                title = "Lockdown active",
+                subtitle = subtitle,
+                onOk = { closeDisallowedVideo() }
+            )
+            if (attached) {
+                overlayUp = true
+                return
+            }
+        }
+
+        showToast("Lockdown active — closing video")
+        closeDisallowedVideo()
     }
 
     private fun triggerBlock(channelName: String) {

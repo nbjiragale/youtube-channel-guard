@@ -15,11 +15,11 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * A small modal-style window centred on the screen showing
+ * A small modal-style window centred on the screen.
  *
- *   "Channel not allowed
- *    @ChannelName
- *    [Allow]   [OK]"
+ * Two variants:
+ * - **Channel block** (`show`): "Channel not allowed / @ChannelName / [Allow] [OK]"
+ * - **Lockdown** (`showLockdown`): "Lockdown active / <label> until 7:00 AM / [OK]"
  *
  * Implementation notes
  * --------------------
@@ -30,9 +30,9 @@ import android.widget.TextView
  * events inside the card still work because focus and touch are independent
  * concepts on Android.
  *
- * No auto-dismiss. The overlay waits for the user to tap OK or Allow.
+ * No auto-dismiss. The overlay waits for the user to tap a button.
  *
- * If `Settings.canDrawOverlays(...)` is false the call to [show] silently
+ * If `Settings.canDrawOverlays(...)` is false the call to `show*` silently
  * returns false and the caller falls back to a no-overlay "silent dismiss"
  * flow.
  */
@@ -43,42 +43,61 @@ class SmallBlockOverlay(private val context: Context) {
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     @Volatile private var view: View? = null
-    @Volatile private var currentChannel: String? = null
 
     fun isShowing(): Boolean = view != null
 
     /**
+     * Show the channel-block variant.
+     *
      * @param onAllow user tapped *Allow* — add this channel to the allow-list
      *   and just hide the overlay.
      * @param onOk user tapped *OK* — close the disallowed video but stay in
      *   YouTube.
-     * @return true if the overlay was successfully attached, false if the
-     *   app does not have the SYSTEM_ALERT_WINDOW permission or attaching
-     *   failed.
      */
     fun show(
         channelName: String,
         onAllow: (String) -> Unit,
         onOk: (String) -> Unit
-    ): Boolean {
+    ): Boolean = attach { _ ->
+        buildChannelBlock(channelName, onAllow, onOk)
+    }
+
+    /**
+     * Show the lockdown-mode variant. No Allow button — by definition the
+     * user has set the lockdown for themselves.
+     *
+     * @param subtitle e.g. "Sleep until 7:00 AM".
+     * @param onOk user tapped OK — close the disallowed video.
+     */
+    fun showLockdown(
+        title: String,
+        subtitle: String,
+        onOk: () -> Unit
+    ): Boolean = attach { _ ->
+        buildLockdown(title, subtitle, onOk)
+    }
+
+    fun hide() {
+        main.post {
+            val v = view ?: return@post
+            try { wm.removeView(v) } catch (_: Exception) { /* already detached */ }
+            view = null
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Window attach.
+    // -------------------------------------------------------------------
+
+    private fun attach(buildContent: (Context) -> View): Boolean {
         var attached = false
         main.post {
-            currentChannel = channelName
-
-            // Already showing → just refresh the channel + handlers.
+            // If something is already showing, swap it out with the new content.
             view?.let { existing ->
-                existing.findViewWithTag<TextView>(TAG_CHANNEL)?.text = channelName
-                existing.findViewWithTag<Button>(TAG_ALLOW)?.setOnClickListener {
-                    onAllow(channelName); hide()
-                }
-                existing.findViewWithTag<Button>(TAG_OK)?.setOnClickListener {
-                    onOk(channelName); hide()
-                }
-                attached = true
-                return@post
+                try { wm.removeView(existing) } catch (_: Exception) { /* ignore */ }
+                view = null
             }
-
-            val v = buildModal(channelName, onAllow, onOk)
+            val v = buildContent(context)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -99,25 +118,12 @@ class SmallBlockOverlay(private val context: Context) {
         return attached
     }
 
-    fun hide() {
-        main.post {
-            val v = view ?: return@post
-            try { wm.removeView(v) } catch (_: Exception) { /* already detached */ }
-            view = null
-            currentChannel = null
-        }
-    }
-
     // -------------------------------------------------------------------
     // View construction.
     // -------------------------------------------------------------------
 
-    private fun buildModal(
-        channelName: String,
-        onAllow: (String) -> Unit,
-        onOk: (String) -> Unit
-    ): View {
-        val card = LinearLayout(context).apply {
+    private fun cardContainer(): LinearLayout =
+        LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 setColor(Color.argb(245, 22, 22, 22))
@@ -128,6 +134,13 @@ class SmallBlockOverlay(private val context: Context) {
             minimumWidth = dp(280)
         }
 
+    private fun buildChannelBlock(
+        channelName: String,
+        onAllow: (String) -> Unit,
+        onOk: (String) -> Unit
+    ): View {
+        val card = cardContainer()
+
         val title = TextView(context).apply {
             text = "Channel not allowed"
             setTextColor(Color.WHITE)
@@ -136,7 +149,6 @@ class SmallBlockOverlay(private val context: Context) {
         }
 
         val channel = TextView(context).apply {
-            tag = TAG_CHANNEL
             text = channelName
             setTextColor(Color.argb(255, 255, 199, 0))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
@@ -149,7 +161,6 @@ class SmallBlockOverlay(private val context: Context) {
         }
 
         val allowBtn = Button(context).apply {
-            tag = TAG_ALLOW
             text = "Allow"
             setTextColor(Color.WHITE)
             background = GradientDrawable().apply {
@@ -166,7 +177,6 @@ class SmallBlockOverlay(private val context: Context) {
         }
 
         val okBtn = Button(context).apply {
-            tag = TAG_OK
             text = "OK"
             setTextColor(Color.BLACK)
             background = GradientDrawable().apply {
@@ -187,12 +197,51 @@ class SmallBlockOverlay(private val context: Context) {
         return card
     }
 
+    private fun buildLockdown(
+        titleText: String,
+        subtitleText: String,
+        onOk: () -> Unit
+    ): View {
+        val card = cardContainer()
+
+        val title = TextView(context).apply {
+            text = titleText
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+
+        val subtitle = TextView(context).apply {
+            text = subtitleText
+            setTextColor(Color.argb(255, 255, 199, 0))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setPadding(0, dp(8), 0, dp(14))
+        }
+
+        val buttonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+
+        val okBtn = Button(context).apply {
+            text = "OK"
+            setTextColor(Color.BLACK)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(255, 255, 199, 0))
+                cornerRadius = dp(10).toFloat()
+            }
+            setPadding(dp(20), dp(6), dp(20), dp(6))
+            setOnClickListener { onOk(); hide() }
+        }
+
+        buttonRow.addView(okBtn)
+
+        card.addView(title)
+        card.addView(subtitle)
+        card.addView(buttonRow)
+        return card
+    }
+
     private fun dp(v: Int): Int =
         (v * context.resources.displayMetrics.density).toInt()
-
-    companion object {
-        private const val TAG_CHANNEL = "ycg_overlay_channel"
-        private const val TAG_ALLOW = "ycg_overlay_allow"
-        private const val TAG_OK = "ycg_overlay_ok"
-    }
 }
