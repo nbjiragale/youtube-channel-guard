@@ -37,6 +37,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -58,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ycg.app.data.LockdownWindow
+import com.ycg.app.data.MAX_SCROLL_THRESHOLD
+import com.ycg.app.data.MIN_SCROLL_THRESHOLD
 import com.ycg.app.ui.LockdownViewModel
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -68,6 +71,8 @@ fun LockdownScreen(viewModel: LockdownViewModel = viewModel()) {
     val windows by viewModel.windows.collectAsState()
     val active by viewModel.activeWindow.collectAsState()
     val blockShorts by viewModel.blockShorts.collectAsState()
+    val scrollEnabled by viewModel.scrollCounterEnabled.collectAsState()
+    val scrollThreshold by viewModel.scrollCounterThreshold.collectAsState()
 
     var editorOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<LockdownWindow?>(null) }
@@ -106,6 +111,14 @@ fun LockdownScreen(viewModel: LockdownViewModel = viewModel()) {
                 BlockShortsCard(
                     enabled = blockShorts,
                     onToggle = { viewModel.setBlockShorts(it) }
+                )
+            }
+            item {
+                ScrollCounterCard(
+                    enabled = scrollEnabled,
+                    threshold = scrollThreshold,
+                    onToggle = { viewModel.setScrollCounterEnabled(it) },
+                    onThresholdChange = { viewModel.setScrollCounterThreshold(it) }
                 )
             }
             item {
@@ -252,6 +265,69 @@ private fun BlockShortsCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
                 checked = enabled,
                 onCheckedChange = onToggle
             )
+        }
+    }
+}
+
+@Composable
+private fun ScrollCounterCard(
+    enabled: Boolean,
+    threshold: Int,
+    onToggle: (Boolean) -> Unit,
+    onThresholdChange: (Int) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Scroll counter",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "A floating pill counts your scrolls each time you " +
+                            "open YouTube. A nudge fires when you cross the " +
+                            "threshold.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(checked = enabled, onCheckedChange = onToggle)
+            }
+            if (enabled) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Nudge after $threshold scrolls",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Slider(
+                    value = threshold.toFloat(),
+                    onValueChange = { onThresholdChange(it.toInt()) },
+                    valueRange = MIN_SCROLL_THRESHOLD.toFloat()..
+                        MAX_SCROLL_THRESHOLD.toFloat(),
+                    steps = (MAX_SCROLL_THRESHOLD - MIN_SCROLL_THRESHOLD) - 1
+                )
+                Text(
+                    "Range: $MIN_SCROLL_THRESHOLD–$MAX_SCROLL_THRESHOLD. " +
+                        "Repeat nudges fire at every multiple of $threshold.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

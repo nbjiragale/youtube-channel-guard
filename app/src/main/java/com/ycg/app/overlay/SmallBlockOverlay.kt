@@ -77,6 +77,20 @@ class SmallBlockOverlay(private val context: Context) {
         buildLockdown(title, subtitle, onOk)
     }
 
+    /**
+     * Show the scroll-warning variant. Two buttons: "Keep watching" (just
+     * dismiss the modal) and "Close YouTube" (caller closes the watch
+     * page).
+     */
+    fun showScrollWarning(
+        title: String,
+        subtitle: String,
+        onDismiss: () -> Unit,
+        onClose: () -> Unit
+    ): Boolean = attach { _ ->
+        buildScrollWarning(title, subtitle, onDismiss, onClose)
+    }
+
     fun hide() {
         main.post {
             val v = view ?: return@post
@@ -235,6 +249,70 @@ class SmallBlockOverlay(private val context: Context) {
         }
 
         buttonRow.addView(okBtn)
+
+        card.addView(title)
+        card.addView(subtitle)
+        card.addView(buttonRow)
+        return card
+    }
+
+    private fun buildScrollWarning(
+        titleText: String,
+        subtitleText: String,
+        onDismiss: () -> Unit,
+        onClose: () -> Unit
+    ): View {
+        val card = cardContainer()
+
+        val title = TextView(context).apply {
+            text = titleText
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+
+        val subtitle = TextView(context).apply {
+            text = subtitleText
+            setTextColor(Color.argb(230, 230, 230, 230))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, dp(8), 0, dp(14))
+        }
+
+        val buttonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+
+        val keepBtn = Button(context).apply {
+            text = "Keep watching"
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), Color.argb(180, 255, 255, 255))
+            }
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setOnClickListener { onDismiss(); hide() }
+        }
+
+        val gap = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(10), 1)
+        }
+
+        val closeBtn = Button(context).apply {
+            text = "Close YouTube"
+            setTextColor(Color.BLACK)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(255, 255, 199, 0))
+                cornerRadius = dp(10).toFloat()
+            }
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setOnClickListener { onClose(); hide() }
+        }
+
+        buttonRow.addView(keepBtn)
+        buttonRow.addView(gap)
+        buttonRow.addView(closeBtn)
 
         card.addView(title)
         card.addView(subtitle)

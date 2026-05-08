@@ -19,6 +19,8 @@ import com.ycg.app.data.LockdownEngine
 import com.ycg.app.data.LockdownRepository
 import com.ycg.app.data.LockdownWindow
 import com.ycg.app.data.RestrictionsRepository
+import com.ycg.app.data.ScrollSession
+import com.ycg.app.overlay.FloatingCounterOverlay
 import com.ycg.app.overlay.SmallBlockOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +62,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
 
         private const val MIN_EVAL_INTERVAL_MS = 600L
         private const val POST_BLOCK_COOLDOWN_MS = 2_500L
+        private const val PILL_INACTIVITY_HIDE_MS = 5_000L
 
         private val TIME_FORMAT: DateTimeFormatter =
             DateTimeFormatter.ofPattern("h:mm a")
@@ -76,17 +79,24 @@ class YouTubeAccessibilityService : AccessibilityService() {
     private lateinit var lockdown: LockdownRepository
     private lateinit var restrictions: RestrictionsRepository
     private lateinit var overlay: SmallBlockOverlay
+    private lateinit var counterOverlay: FloatingCounterOverlay
     private val allowListState = MutableStateFlow<Set<String>>(emptySet())
     private val lockdownState = MutableStateFlow<List<LockdownWindow>>(emptyList())
     private val blockShortsState = MutableStateFlow(false)
+    private val scrollEnabledState = MutableStateFlow(true)
+    private val scrollThresholdState = MutableStateFlow(20)
     private var collectorJob: Job? = null
     private var lockdownCollectorJob: Job? = null
     private var restrictionsCollectorJob: Job? = null
+    private var scrollPrefsCollectorJob: Job? = null
 
     private var lastEvalAt = 0L
     private var lastBlockAt = 0L
     private var lastDecisionChannel: String? = null
     private var overlayUp = false
+
+    private var scrollSession = ScrollSession(threshold = 20)
+    private val hidePillRunnable = Runnable { counterOverlay.hide() }
 
     override fun onCreate() {
         super.onCreate()
@@ -94,6 +104,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
         lockdown = LockdownRepository(applicationContext)
         restrictions = RestrictionsRepository(applicationContext)
         overlay = SmallBlockOverlay(applicationContext)
+        counterOverlay = FloatingCounterOverlay(applicationContext)
     }
 
     override fun onServiceConnected() {
@@ -108,6 +119,24 @@ class YouTubeAccessibilityService : AccessibilityService() {
         restrictionsCollectorJob = scope.launch {
             restrictions.blockShorts.collect { blockShortsState.value = it }
         }
+        scrollPrefsCollectorJob = scope.launch {
+            launch {
+                restrictions.scrollCounterEnabled.collect { enabled ->
+                    scrollEnabledState.value = enabled
+                    if (!enabled) main.post { counterOverlay.hide() }
+                }
+            }
+            launch {
+                restrictions.scrollCounterThreshold.collect { value ->
+                    scrollThresholdState.value = value
+                    scrollSession = ScrollSession(threshold = value).also { fresh ->
+                        // Preserve current foreground stamp so we don't
+                        // immediately reset.
+                        fresh.onYouTubeForeground(SystemClock.uptimeMillis())
+                    }
+                }
+            }
+        }
         startService(Intent(this, GuardForegroundService::class.java))
         Log.i(TAG, "Accessibility service connected")
     }
@@ -117,7 +146,21 @@ class YouTubeAccessibilityService : AccessibilityService() {
         if (event.packageName != YT_PACKAGE) return
 
         val now = SystemClock.uptimeMillis()
-        // Don't re-trigger while our overlay is up — user is still deciding.
+
+        // Mark YouTube as foreground; lazy-reset the scroll session if
+        // we've been away long enough. Do this on EVERY YouTube event so
+        // the inactivity-watchdog also keeps the pill on screen.
+        onYouTubeEventSeen(now)
+
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
+                handleScrollEvent(now)
+                return
+            }
+        }
+
+        // Block-decision flow is throttled / suppressed while our modal
+        // is up, but scroll counting (above) is not.
         if (overlayUp) return
         if (now - lastBlockAt < POST_BLOCK_COOLDOWN_MS) return
         if (now - lastEvalAt < MIN_EVAL_INTERVAL_MS) return
@@ -132,6 +175,102 @@ class YouTubeAccessibilityService : AccessibilityService() {
         }
     }
 
+    // --------------------------------------------------------------------
+    // Scroll counter.
+    // --------------------------------------------------------------------
+
+    private fun onYouTubeEventSeen(nowUptimeMs: Long) {
+        val isNewSession = scrollSession.onYouTubeForeground(nowUptimeMs)
+        if (!scrollEnabledState.value) {
+            main.removeCallbacks(hidePillRunnable)
+            counterOverlay.hide()
+            return
+        }
+        // Show / refresh the pill if overlay permission is granted.
+        if (Settings.canDrawOverlays(applicationContext)) {
+            if (!counterOverlay.isShowing()) {
+                counterOverlay.show(
+                    initialCount = scrollSession.count,
+                    threshold = scrollSession.threshold,
+                    onTap = { snoozePillForSession() }
+                )
+            } else if (isNewSession) {
+                counterOverlay.update(
+                    count = scrollSession.count,
+                    threshold = scrollSession.threshold
+                )
+            }
+        }
+        // Keep the pill alive for PILL_INACTIVITY_HIDE_MS after the most
+        // recent YouTube event; if YouTube goes to background, the pill
+        // disappears on its own.
+        main.removeCallbacks(hidePillRunnable)
+        main.postDelayed(hidePillRunnable, PILL_INACTIVITY_HIDE_MS)
+    }
+
+    private fun handleScrollEvent(nowUptimeMs: Long) {
+        if (!scrollEnabledState.value) return
+        val decision = scrollSession.onRawScrollEvent(nowUptimeMs)
+        when (decision) {
+            ScrollSession.Decision.None -> Unit
+            is ScrollSession.Decision.IncrementOnly -> {
+                counterOverlay.update(decision.count, scrollSession.threshold)
+            }
+            is ScrollSession.Decision.WarnAtMilestone -> {
+                counterOverlay.update(decision.count, scrollSession.threshold)
+                triggerScrollWarning(decision.count)
+            }
+        }
+    }
+
+    private fun snoozePillForSession() {
+        scrollSession.snooze()
+        // Visually flatten the pill back to neutral so the user gets
+        // feedback that the snooze took effect.
+        counterOverlay.update(
+            count = scrollSession.count,
+            threshold = Int.MAX_VALUE
+        )
+    }
+
+    private fun triggerScrollWarning(count: Int) {
+        // The warning popup is non-blocking — it doesn't pause media or
+        // close the video. It's a nudge.
+        if (!Settings.canDrawOverlays(applicationContext)) {
+            showToast("You've scrolled $count times this session.")
+            return
+        }
+        val attached = overlay.showScrollWarning(
+            title = "You've scrolled $count times.",
+            subtitle = scrollNudgeMessage(count),
+            onDismiss = {
+                overlayUp = false
+                scrollSession.snooze()
+                counterOverlay.update(
+                    count = scrollSession.count,
+                    threshold = Int.MAX_VALUE
+                )
+            },
+            onClose = {
+                overlayUp = false
+                scrollSession.snooze()
+                counterOverlay.hide()
+                closeDisallowedVideo()
+            }
+        )
+        if (attached) {
+            overlayUp = true
+        }
+    }
+
+    private fun scrollNudgeMessage(count: Int): String = when {
+        count >= 60 -> "An hour of your life can disappear here. " +
+            "Maybe step away for a bit?"
+        count >= 40 -> "Still here? You've scrolled $count times. " +
+            "Probably nothing new worth your time tonight."
+        else -> "Maybe close YouTube for a bit?"
+    }
+
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
@@ -139,7 +278,10 @@ class YouTubeAccessibilityService : AccessibilityService() {
         collectorJob?.cancel()
         lockdownCollectorJob?.cancel()
         restrictionsCollectorJob?.cancel()
+        scrollPrefsCollectorJob?.cancel()
+        main.removeCallbacks(hidePillRunnable)
         overlay.hide()
+        counterOverlay.hide()
         overlayUp = false
         super.onDestroy()
     }

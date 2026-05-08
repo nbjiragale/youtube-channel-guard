@@ -3,6 +3,7 @@ package com.ycg.app.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ycg.app.data.DEFAULT_SCROLL_THRESHOLD
 import com.ycg.app.data.LockdownEngine
 import com.ycg.app.data.LockdownRepository
 import com.ycg.app.data.LockdownWindow
@@ -33,6 +34,20 @@ class LockdownViewModel(app: Application) : AndroidViewModel(app) {
         initialValue = false
     )
 
+    val scrollCounterEnabled: StateFlow<Boolean> =
+        restrictions.scrollCounterEnabled.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = true
+        )
+
+    val scrollCounterThreshold: StateFlow<Int> =
+        restrictions.scrollCounterThreshold.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = DEFAULT_SCROLL_THRESHOLD
+        )
+
     /**
      * Recomputes every minute. Combined with [windows] so the banner updates
      * the moment the user toggles a window on/off, and at the next minute
@@ -61,6 +76,14 @@ class LockdownViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setBlockShorts(enabled: Boolean) {
         viewModelScope.launch { restrictions.setBlockShorts(enabled) }
+    }
+
+    fun setScrollCounterEnabled(enabled: Boolean) {
+        viewModelScope.launch { restrictions.setScrollCounterEnabled(enabled) }
+    }
+
+    fun setScrollCounterThreshold(value: Int) {
+        viewModelScope.launch { restrictions.setScrollCounterThreshold(value) }
     }
 
     private fun ticker(periodMs: Long) = flow {
