@@ -46,6 +46,33 @@ object ChannelDetector {
      */
     fun isShorts(root: AccessibilityNodeInfo): Boolean = looksLikeShorts(root)
 
+    /**
+     * True when the visible accessibility tree appears to contain an
+     * active video — either a watch page (Subscribe button + Like
+     * present) or a Short. Used by the service to decide whether
+     * "close the video" actions are safe to perform; if no player is
+     * visible (we're on the Home / Subscriptions / Search feed
+     * already), we must NOT press BACK because that would exit
+     * YouTube to the launcher.
+     */
+    fun isPlayerOpen(root: AccessibilityNodeInfo): Boolean {
+        if (looksLikeShorts(root)) return true
+        return treeContains(root) { node ->
+            val cd = node.contentDescription?.toString()?.lowercase()
+                ?: return@treeContains false
+            // Watch-page-specific signals; none of these are present on
+            // the Home / Subscriptions / Search feeds.
+            cd.contains("like this video") ||
+                cd.contains("dislike this video") ||
+                cd.contains("expand the player") ||
+                cd.contains("collapse the player") ||
+                cd.contains("minimize the player") ||
+                cd.contains("minimize player") ||
+                cd.contains("expand description") ||
+                SUBSCRIBE_PREFIXES.any { p -> cd.startsWith(p.lowercase()) }
+        }
+    }
+
     // -------------------------------------------------------------------
     // Watch page.
     // -------------------------------------------------------------------

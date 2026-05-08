@@ -421,18 +421,35 @@ class YouTubeAccessibilityService : AccessibilityService() {
      * Strategy:
      *   1. Pause audio again (belt-and-suspenders for cases where YouTube
      *      reclaimed audio focus while the user was looking at the modal).
-     *   2. `GLOBAL_ACTION_BACK` — collapses the watch page to mini-player,
-     *      or exits a Short.
-     *   3. After a beat, look for the mini-player's "Close" button in the
-     *      accessibility tree and click it so the player goes away
-     *      entirely. Repeated once a moment later in case the first attempt
-     *      ran before the mini-player had finished animating in.
+     *   2. **Only if a player is actually visible**: `GLOBAL_ACTION_BACK`
+     *      to collapse the watch page to mini-player, or to exit a Short.
+     *      Skipping BACK when no player is open is critical — pressing
+     *      BACK from YouTube's home / feed would exit the YouTube app
+     *      entirely, which is *not* what we want.
+     *   3. After a beat, **only if a mini-player is detected**, click its
+     *      Close button so the player goes away entirely. Skipping this
+     *      when there's no mini-player avoids accidentally clicking other
+     *      "Close"-labelled buttons elsewhere in YouTube's UI.
      */
     private fun closeDisallowedVideo() {
         overlayUp = false
         sendMediaPause()
-        performGlobalAction(GLOBAL_ACTION_BACK)
-        main.postDelayed({ closeMiniPlayerIfAny(); sendMediaPause() }, 350)
+
+        val root = rootInActiveWindow
+        val playerOpen = root != null && ChannelDetector.isPlayerOpen(root)
+
+        if (playerOpen) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        } else {
+            Log.i(TAG, "closeDisallowedVideo: no player visible, skipping BACK")
+        }
+
+        // Re-pause audio in case YouTube grabbed focus back, and try
+        // to dismiss any mini-player that materialised after BACK.
+        main.postDelayed({
+            sendMediaPause()
+            closeMiniPlayerIfAny()
+        }, 350)
         main.postDelayed({ closeMiniPlayerIfAny() }, 1_100)
     }
 
@@ -454,10 +471,18 @@ class YouTubeAccessibilityService : AccessibilityService() {
 
     private fun closeMiniPlayerIfAny() {
         val root = rootInActiveWindow ?: return
+        // Be strict on what we're willing to click. "Close" alone matches
+        // a lot of things in YouTube's UI (close cast dialog, close
+        // search overlay, close survey card, …) so we only click nodes
+        // whose content description clearly identifies the mini-player.
         val candidate = findClickableByContentDescription(root) { desc ->
-            desc.equals("Close", ignoreCase = true) ||
-                desc.contains("Close player", ignoreCase = true) ||
-                desc.contains("Dismiss", ignoreCase = true)
+            val d = desc.lowercase()
+            d == "close mini player" ||
+                d == "close miniplayer" ||
+                d == "close the mini player" ||
+                d == "close player" ||
+                d == "dismiss mini player" ||
+                d == "dismiss miniplayer"
         }
         if (candidate != null) {
             try {

@@ -79,8 +79,8 @@ class SmallBlockOverlay(private val context: Context) {
 
     /**
      * Show the scroll-warning variant. Two buttons: "Keep watching" (just
-     * dismiss the modal) and "Close YouTube" (caller closes the watch
-     * page).
+     * dismiss the modal) and "Close video" (caller closes the watch
+     * page but keeps the user inside YouTube).
      */
     fun showScrollWarning(
         title: String,
@@ -300,7 +300,7 @@ class SmallBlockOverlay(private val context: Context) {
         }
 
         val closeBtn = Button(context).apply {
-            text = "Close YouTube"
+            text = "Close video"
             setTextColor(Color.BLACK)
             background = GradientDrawable().apply {
                 setColor(Color.argb(255, 255, 199, 0))
