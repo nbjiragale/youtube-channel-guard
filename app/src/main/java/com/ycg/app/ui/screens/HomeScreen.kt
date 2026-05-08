@@ -208,8 +208,11 @@ private fun StatusCard(
             }
             if (!overlayEnabled) {
                 Text(
-                    "Without overlay permission the small banner can't be shown — " +
-                        "the guard will fall back to a full-screen block screen.",
+                    "Without 'Display over other apps' the OK/Allow modal " +
+                        "can't be shown. The guard will still close " +
+                        "disallowed videos silently (with a Toast) but you " +
+                        "won't get the in-place dialog.",
+                    color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall
                 )
             }

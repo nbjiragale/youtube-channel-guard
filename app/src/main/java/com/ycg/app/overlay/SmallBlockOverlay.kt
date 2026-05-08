@@ -15,19 +15,26 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * A small toast-like banner that floats at the top of the screen telling the
- * user the current video was blocked, and offering a one-tap "Allow" button
- * that adds that channel to the allow-list.
+ * A small modal-style window centred on the screen showing
  *
- * Implementation
- * --------------
- * Uses a `TYPE_APPLICATION_OVERLAY` window so it can be shown on top of
- * YouTube. Auto-dismisses after [VISIBLE_DURATION_MS]. The "Allow" tap fires
- * [onAllow] and dismisses immediately.
+ *   "Channel not allowed
+ *    @ChannelName
+ *    [Allow]   [OK]"
+ *
+ * Implementation notes
+ * --------------------
+ * Uses a `TYPE_APPLICATION_OVERLAY` window so it can be drawn on top of
+ * YouTube. The window is *not* focusable — that way `performGlobalAction(
+ * GLOBAL_ACTION_BACK)` in the AccessibilityService still goes to YouTube
+ * (collapsing the watch page) instead of being intercepted here. Touch
+ * events inside the card still work because focus and touch are independent
+ * concepts on Android.
+ *
+ * No auto-dismiss. The overlay waits for the user to tap OK or Allow.
  *
  * If `Settings.canDrawOverlays(...)` is false the call to [show] silently
- * returns false, letting the caller fall back to a different blocking
- * strategy (full-screen activity, etc.).
+ * returns false and the caller falls back to a no-overlay "silent dismiss"
+ * flow.
  */
 class SmallBlockOverlay(private val context: Context) {
 
@@ -36,47 +43,56 @@ class SmallBlockOverlay(private val context: Context) {
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     @Volatile private var view: View? = null
-    private var dismissRunnable: Runnable? = null
+    @Volatile private var currentChannel: String? = null
 
     fun isShowing(): Boolean = view != null
 
     /**
-     * @return true if the overlay was successfully attached, false if the app
-     *   does not have the SYSTEM_ALERT_WINDOW permission or attaching failed.
+     * @param onAllow user tapped *Allow* — add this channel to the allow-list
+     *   and just hide the overlay.
+     * @param onOk user tapped *OK* — close the disallowed video but stay in
+     *   YouTube.
+     * @return true if the overlay was successfully attached, false if the
+     *   app does not have the SYSTEM_ALERT_WINDOW permission or attaching
+     *   failed.
      */
-    fun show(channelName: String, onAllow: (String) -> Unit): Boolean {
+    fun show(
+        channelName: String,
+        onAllow: (String) -> Unit,
+        onOk: (String) -> Unit
+    ): Boolean {
         var attached = false
         main.post {
-            // Already showing → just update the channel text + reset dismiss timer.
+            currentChannel = channelName
+
+            // Already showing → just refresh the channel + handlers.
             view?.let { existing ->
-                (existing.findViewWithTag<TextView>(TAG_BODY))?.text = bodyText(channelName)
-                (existing.findViewWithTag<Button>(TAG_ALLOW))?.setOnClickListener {
+                existing.findViewWithTag<TextView>(TAG_CHANNEL)?.text = channelName
+                existing.findViewWithTag<Button>(TAG_ALLOW)?.setOnClickListener {
                     onAllow(channelName); hide()
                 }
-                rescheduleDismiss()
+                existing.findViewWithTag<Button>(TAG_OK)?.setOnClickListener {
+                    onOk(channelName); hide()
+                }
                 attached = true
                 return@post
             }
 
-            val v = buildBanner(channelName, onAllow)
+            val v = buildModal(channelName, onAllow, onOk)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = dp(48)
+                gravity = Gravity.CENTER
             }
             try {
                 wm.addView(v, params)
                 view = v
-                rescheduleDismiss()
                 attached = true
             } catch (_: Exception) {
-                // Permission missing or surface unavailable. Caller falls back.
                 view = null
             }
         }
@@ -85,79 +101,98 @@ class SmallBlockOverlay(private val context: Context) {
 
     fun hide() {
         main.post {
-            cancelDismiss()
             val v = view ?: return@post
             try { wm.removeView(v) } catch (_: Exception) { /* already detached */ }
             view = null
+            currentChannel = null
         }
-    }
-
-    private fun rescheduleDismiss() {
-        cancelDismiss()
-        val r = Runnable { hide() }
-        dismissRunnable = r
-        main.postDelayed(r, VISIBLE_DURATION_MS)
-    }
-
-    private fun cancelDismiss() {
-        dismissRunnable?.let { main.removeCallbacks(it) }
-        dismissRunnable = null
     }
 
     // -------------------------------------------------------------------
     // View construction.
     // -------------------------------------------------------------------
 
-    private fun buildBanner(channelName: String, onAllow: (String) -> Unit): View {
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+    private fun buildModal(
+        channelName: String,
+        onAllow: (String) -> Unit,
+        onOk: (String) -> Unit
+    ): View {
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
-                setColor(Color.argb(235, 24, 24, 24))
-                cornerRadius = dp(14).toFloat()
+                setColor(Color.argb(245, 22, 22, 22))
+                cornerRadius = dp(16).toFloat()
+                setStroke(dp(1), Color.argb(120, 255, 199, 0))
             }
-            setPadding(dp(16), dp(10), dp(10), dp(10))
+            setPadding(dp(20), dp(18), dp(20), dp(14))
+            minimumWidth = dp(280)
         }
 
-        val bodyView = TextView(context).apply {
-            tag = TAG_BODY
-            text = bodyText(channelName)
+        val title = TextView(context).apply {
+            text = "Channel not allowed"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            maxWidth = dp(220)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+
+        val channel = TextView(context).apply {
+            tag = TAG_CHANNEL
+            text = channelName
+            setTextColor(Color.argb(255, 255, 199, 0))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setPadding(0, dp(8), 0, dp(14))
+        }
+
+        val buttonRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
         }
 
         val allowBtn = Button(context).apply {
             tag = TAG_ALLOW
             text = "Allow"
+            setTextColor(Color.WHITE)
+            background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), Color.argb(180, 255, 255, 255))
+            }
+            setPadding(dp(16), dp(6), dp(16), dp(6))
+            setOnClickListener { onAllow(channelName); hide() }
+        }
+
+        val gap = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(10), 1)
+        }
+
+        val okBtn = Button(context).apply {
+            tag = TAG_OK
+            text = "OK"
             setTextColor(Color.BLACK)
             background = GradientDrawable().apply {
                 setColor(Color.argb(255, 255, 199, 0))
                 cornerRadius = dp(10).toFloat()
             }
-            setPadding(dp(14), dp(4), dp(14), dp(4))
-            setOnClickListener { onAllow(channelName); hide() }
+            setPadding(dp(20), dp(6), dp(20), dp(6))
+            setOnClickListener { onOk(channelName); hide() }
         }
 
-        val spacer = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(12), 1)
-        }
+        buttonRow.addView(allowBtn)
+        buttonRow.addView(gap)
+        buttonRow.addView(okBtn)
 
-        container.addView(bodyView)
-        container.addView(spacer)
-        container.addView(allowBtn)
-        return container
+        card.addView(title)
+        card.addView(channel)
+        card.addView(buttonRow)
+        return card
     }
-
-    private fun bodyText(channelName: String): String =
-        "Blocked: $channelName"
 
     private fun dp(v: Int): Int =
         (v * context.resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val VISIBLE_DURATION_MS = 4_000L
-        private const val TAG_BODY = "ycg_overlay_body"
+        private const val TAG_CHANNEL = "ycg_overlay_channel"
         private const val TAG_ALLOW = "ycg_overlay_allow"
+        private const val TAG_OK = "ycg_overlay_ok"
     }
 }

@@ -33,15 +33,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".ui.BlockedActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTask"
-            android:noHistory="true"
-            android:taskAffinity=""
-            android:theme="@style/Theme.YouTubeChannelGuard" />
-
         <service
             android:name=".service.YouTubeAccessibilityService"
             android:exported="true"
