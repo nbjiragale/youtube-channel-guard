@@ -1,15 +1,19 @@
 package com.ycg.app.service
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.ycg.app.data.AllowListMatcher
 import com.ycg.app.data.AllowListRepository
-import com.ycg.app.overlay.BlockOverlayManager
+import com.ycg.app.ui.BlockedActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,32 +21,45 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Watches the YouTube app's UI tree and decides whether the currently visible
- * video is from an allow-listed channel. If not, it shows a block overlay and
- * navigates back after a short delay.
+ * Watches the YouTube app's accessibility tree, decides whether the currently
+ * visible video is from an allow-listed channel, and if not:
+ *   1. Dispatches `KEYCODE_MEDIA_PAUSE` to the active media session so audio
+ *      stops *immediately*.
+ *   2. Launches [BlockedActivity] which becomes the foreground task and
+ *      forces YouTube into the background — this is what stops the player UI
+ *      and prevents the "playing behind the overlay" problem.
  *
- * Implementation notes
- * --------------------
- * YouTube's resource IDs change between releases, so instead of hard-coding
- * fragile IDs we walk the visible window's accessibility tree and look for
- * candidate "channel name" nodes by structural heuristics:
+ * Detection strategy
+ * ------------------
+ * Channel detection is the hardest part because YouTube's release APK uses
+ * obfuscated resource IDs and its tree is huge. We use a small set of robust,
+ * production-tested signals in priority order:
  *
- *  - Watch page: under the title there's a horizontal cluster containing the
- *    avatar and channel name. We look for a clickable / focusable node whose
- *    text starts with "@" (handle) or sits adjacent to a node whose
- *    contentDescription contains "channel".
- *  - Shorts: each Short has a "@handle" tappable at the bottom. Same heuristic.
+ *   1. **Subscribe button.** On the watch page YouTube's Subscribe / Subscribed
+ *      button is always present and its `contentDescription` is literally of
+ *      the form "Subscribe to <ChannelName>" / "Subscribed to <ChannelName>".
+ *      This is by far the most reliable per-video channel signal.
  *
- * Heuristics evolve; if you find a YouTube build where detection misses, the
- * behaviour falls back safely to "no decision" — i.e. we do NOT block what we
- * can't read. False-blocking would be far worse than a missed block.
+ *   2. **Shorts handle.** When the visible UI is a Short (we detect this by
+ *      the presence of well-known Shorts-only labels such as the "Shorts"
+ *      navigation pip or "Remix" action), we look for the topmost clickable
+ *      node whose text starts with "@" — that's the Short's creator handle.
+ *
+ * If neither signal fires we **fail open** (treat as allowed) rather than
+ * risk false-blocking on an arbitrary `@username` from a comment.
  */
 class YouTubeAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "YTGuard"
         private const val YT_PACKAGE = "com.google.android.youtube"
-        private const val BLOCK_BACK_DELAY_MS = 4_000L
+
+        /** Don't re-evaluate / re-block more often than this. */
+        private const val MIN_EVAL_INTERVAL_MS = 600L
+
+        /** After we trigger a block, ignore further events for this long so we
+         *  don't relaunch BlockedActivity in a loop while it's coming up. */
+        private const val POST_BLOCK_COOLDOWN_MS = 2_500L
 
         @Volatile
         private var instance: YouTubeAccessibilityService? = null
@@ -50,38 +67,29 @@ class YouTubeAccessibilityService : AccessibilityService() {
         fun isRunning(): Boolean = instance != null
     }
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO)
     private lateinit var allowList: AllowListRepository
-    private lateinit var overlayManager: BlockOverlayManager
-
     private val allowListState = MutableStateFlow<Set<String>>(emptySet())
     private var collectorJob: Job? = null
 
-    /**
-     * Last channel we saw + acted on, so we don't keep flickering the overlay
-     * on every TYPE_WINDOW_CONTENT_CHANGED event.
-     */
-    private var lastEvaluatedChannel: String? = null
-    private var pendingBackRunnable: Runnable? = null
+    private var lastEvalAt = 0L
+    private var lastBlockAt = 0L
+    private var lastDecisionChannel: String? = null
 
     override fun onCreate() {
         super.onCreate()
         allowList = AllowListRepository(applicationContext)
-        overlayManager = BlockOverlayManager(applicationContext)
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        // Keep the latest allow-list in memory so we don't hit DataStore on
-        // every accessibility event.
         collectorJob = scope.launch {
             allowList.allowedChannels.collect { allowListState.value = it }
         }
-        // Start the foreground status notification.
-        val intent = Intent(this, GuardForegroundService::class.java)
-        startForegroundService(intent)
+        // Optional persistent notification.
+        startService(Intent(this, GuardForegroundService::class.java))
         Log.i(TAG, "Accessibility service connected")
     }
 
@@ -89,9 +97,13 @@ class YouTubeAccessibilityService : AccessibilityService() {
         if (event == null) return
         if (event.packageName != YT_PACKAGE) return
 
+        val now = SystemClock.uptimeMillis()
+        if (now - lastBlockAt < POST_BLOCK_COOLDOWN_MS) return
+        if (now - lastEvalAt < MIN_EVAL_INTERVAL_MS) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                lastEvalAt = now
                 evaluateCurrentWindow()
             }
             else -> Unit
@@ -103,151 +115,71 @@ class YouTubeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         collectorJob?.cancel()
-        cancelPendingBack()
-        overlayManager.hide()
         super.onDestroy()
     }
 
-    private fun evaluateCurrentWindow() {
-        val root = rootInActiveWindow ?: return
-        val channelName = try {
-            findChannelName(root)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Channel detection failed", t)
-            null
-        }
+    // --------------------------------------------------------------------
+    // Decision flow.
+    // --------------------------------------------------------------------
 
-        if (channelName == null) {
-            // We don't know what channel this is — clear stale block UI but do
-            // NOT trigger a block. Better to under-enforce than to false-positive
-            // on, e.g., the home page where no single channel is visible.
-            if (overlayManager.isShowing()) {
-                overlayManager.hide()
-                cancelPendingBack()
-            }
-            lastEvaluatedChannel = null
+    private fun evaluateCurrentWindow() {
+        val root: AccessibilityNodeInfo = rootInActiveWindow ?: return
+        val detected = ChannelDetector.detect(root)
+        if (detected == null) {
+            // Don't know what we're looking at — explicitly allow. Better to
+            // under-enforce on home/search/library pages than to false-block.
+            lastDecisionChannel = null
             return
         }
 
-        // Same channel as last decision — nothing to do.
-        if (channelName.equals(lastEvaluatedChannel, ignoreCase = true) &&
-            overlayManager.isShowing()
-        ) return
-        lastEvaluatedChannel = channelName
-
-        val allowed = AllowListMatcher.isAllowed(channelName, allowListState.value)
-        Log.i(TAG, "Detected channel='$channelName' allowed=$allowed")
-        if (allowed) {
-            overlayManager.hide()
-            cancelPendingBack()
-        } else {
-            overlayManager.show(channelName)
-            scheduleBack()
+        // Re-blocking the same channel within the cooldown window is already
+        // suppressed above; this is just an info log.
+        if (detected != lastDecisionChannel) {
+            Log.i(TAG, "Detected channel='$detected'")
         }
+        lastDecisionChannel = detected
+
+        if (AllowListMatcher.isAllowed(detected, allowListState.value)) return
+
+        triggerBlock(detected)
     }
 
-    private fun scheduleBack() {
-        cancelPendingBack()
-        val r = Runnable {
-            // Press back to leave the watch / shorts page. If still on YouTube
-            // and still on a disallowed video, the next event will re-trigger.
-            performGlobalAction(GLOBAL_ACTION_BACK)
-        }
-        pendingBackRunnable = r
-        mainHandler.postDelayed(r, BLOCK_BACK_DELAY_MS)
+    private fun triggerBlock(channelName: String) {
+        lastBlockAt = SystemClock.uptimeMillis()
+        Log.i(TAG, "Blocking channel='$channelName'")
+
+        // 1. Pause audio first so the user doesn't hear a half-second of the
+        //    disallowed video while BlockedActivity is being created.
+        sendMediaPause()
+
+        // 2. Launch our blocking screen on top of YouTube. Becoming the
+        //    foreground task is what actually backgrounds YouTube and stops
+        //    the player UI — the overlay-on-top approach we used before could
+        //    not do that.
+        val intent = Intent(this, BlockedActivity::class.java)
+            .putExtra(BlockedActivity.EXTRA_CHANNEL, channelName)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_NO_HISTORY or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            )
+        startActivity(intent)
+
+        // 3. Belt-and-suspenders: a moment later, send another pause in case
+        //    YouTube grabbed audio focus back during the activity transition.
+        main.postDelayed({ sendMediaPause() }, 400)
     }
 
-    private fun cancelPendingBack() {
-        pendingBackRunnable?.let { mainHandler.removeCallbacks(it) }
-        pendingBackRunnable = null
-    }
-
-    // --------------------------------------------------------------------
-    // Channel-name detection heuristics.
-    // --------------------------------------------------------------------
-
-    private fun findChannelName(root: AccessibilityNodeInfo): String? {
-        // Heuristic 1: look for a node whose viewIdResourceName ends with a
-        // known channel-name id. YouTube has historically used ids ending in
-        // "/channel_name" or "/channel_title".
-        val byId = findFirstByIdSuffix(root, listOf("channel_name", "channel_title", "owner_text"))
-        val candidate1 = byId?.let { extractText(it) }?.cleanedChannel()
-        if (!candidate1.isNullOrEmpty()) return candidate1
-
-        // Heuristic 2: any text node starting with "@" that is clickable —
-        // YouTube uses @handle for the channel link on Shorts and the new
-        // watch UI.
-        val handle = findHandleNode(root)
-        val candidate2 = handle?.cleanedChannel()
-        if (!candidate2.isNullOrEmpty()) return candidate2
-
-        // Heuristic 3: a node whose contentDescription is exactly "Channel" —
-        // its sibling typically holds the channel text. This is the most
-        // brittle, used only as a last resort.
-        val sibling = findChannelByDescription(root)
-        return sibling?.cleanedChannel()
-    }
-
-    private fun findFirstByIdSuffix(
-        node: AccessibilityNodeInfo,
-        suffixes: List<String>
-    ): AccessibilityNodeInfo? {
-        val viewId = node.viewIdResourceName
-        if (viewId != null && suffixes.any { viewId.endsWith("/$it") || viewId.endsWith(it) }) {
-            return node
+    private fun sendMediaPause() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE)
+        val up = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE)
+        try {
+            am.dispatchMediaKeyEvent(down)
+            am.dispatchMediaKeyEvent(up)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to dispatch media pause", t)
         }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            findFirstByIdSuffix(child, suffixes)?.let { return it }
-        }
-        return null
-    }
-
-    private fun findHandleNode(node: AccessibilityNodeInfo): String? {
-        val text = node.text?.toString()
-        if (!text.isNullOrEmpty() && text.startsWith("@") && text.length in 2..40) {
-            return text
-        }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            findHandleNode(child)?.let { return it }
-        }
-        return null
-    }
-
-    private fun findChannelByDescription(node: AccessibilityNodeInfo): String? {
-        val desc = node.contentDescription?.toString()?.lowercase()
-        if (desc != null && (desc == "channel" || desc.contains("channel name"))) {
-            return extractText(node)
-        }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            findChannelByDescription(child)?.let { return it }
-        }
-        return null
-    }
-
-    private fun extractText(node: AccessibilityNodeInfo): String? {
-        node.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-        node.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            extractText(child)?.let { return it }
-        }
-        return null
-    }
-
-    /**
-     * Normalises a raw string from YouTube into a comparable channel name.
-     * Strips the leading "@" so that a handle "@MrBeast" matches the
-     * user's allow-list entry "MrBeast".
-     */
-    private fun String?.cleanedChannel(): String? {
-        if (this == null) return null
-        var s = trim()
-        if (s.startsWith("@")) s = s.removePrefix("@")
-        // Handle "Channel name • 1.2M subscribers" style strings.
-        s = s.substringBefore('•').trim()
-        return s.ifBlank { null }
     }
 }
