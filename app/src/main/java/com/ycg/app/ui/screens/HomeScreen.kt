@@ -42,6 +42,7 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
@@ -51,12 +52,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,7 +79,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.ycg.app.data.AllowListMatcher
+import com.ycg.app.data.AllowedChannel
 import com.ycg.app.ui.HomeViewModel
 
 private data class PermissionState(
@@ -93,6 +99,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
     val context = LocalContext.current
     val channels by viewModel.channels.collectAsState()
     val lastDetected by viewModel.lastDetected.collectAsState()
+    val addState by viewModel.addState.collectAsState()
 
     var permissions by remember { mutableStateOf(readPermissionState(context)) }
     val owner = LocalLifecycleOwner.current
@@ -106,16 +113,46 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
         onDispose { owner.lifecycle.removeObserver(observer) }
     }
 
-    var pendingDelete by remember { mutableStateOf<String?>(null) }
+    var pendingDelete by remember { mutableStateOf<AllowedChannel?>(null) }
+    val snackbar = remember { SnackbarHostState() }
+
+    LaunchedEffect(addState) {
+        when (val s = addState) {
+            HomeViewModel.AddState.MissingApiKey -> {
+                snackbar.showSnackbar(
+                    "Channel saved. API key not set, so it won't be resolved or " +
+                        "appear in the feed yet."
+                )
+                viewModel.ackAddState()
+            }
+            HomeViewModel.AddState.NotFound -> {
+                snackbar.showSnackbar(
+                    "Couldn't find that channel on YouTube. Try the @handle, " +
+                        "e.g. @MrBeast."
+                )
+                viewModel.ackAddState()
+            }
+            is HomeViewModel.AddState.Failed -> {
+                snackbar.showSnackbar("Lookup failed: ${s.message}")
+                viewModel.ackAddState()
+            }
+            is HomeViewModel.AddState.Added -> {
+                snackbar.showSnackbar("Added ${s.channel.label}")
+                viewModel.ackAddState()
+            }
+            else -> Unit
+        }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("Channel Guard") },
+                title = { Text("Channels") },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors()
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbar) }
     ) { padding ->
         LazyColumn(
             modifier = Modifier
@@ -129,7 +166,10 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
         ) {
             item {
                 if (permissions.allGranted) {
-                    GuardStatusBanner(channelCount = channels.size)
+                    GuardStatusBanner(
+                        channelCount = channels.size,
+                        hasApiKey = viewModel.hasApiKey
+                    )
                 } else {
                     SetupCard(
                         permissions = permissions,
@@ -144,11 +184,9 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
                 LastDetectedCard(
                     detectedName = lastDetected?.name,
                     alreadyAllowed = lastDetected?.let { ld ->
-                        channels.any {
-                            AllowListMatcher.normalize(it) ==
-                                AllowListMatcher.normalize(ld.name)
-                        }
+                        isOnAllowList(ld.name, channels)
                     } ?: false,
+                    isResolving = addState is HomeViewModel.AddState.Resolving,
                     onApprove = { name -> viewModel.add(name) }
                 )
             }
@@ -161,16 +199,19 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
             }
 
             item {
-                AddChannelRow(onAdd = { name -> viewModel.add(name) })
+                AddChannelRow(
+                    isResolving = addState is HomeViewModel.AddState.Resolving,
+                    onAdd = { name -> viewModel.add(name) }
+                )
             }
 
             if (channels.isEmpty()) {
                 item { ChannelsEmptyState() }
             } else {
-                items(channels.toList(), key = { it }) { name ->
+                items(channels, key = { it.originalInput.ifBlank { it.channelId } }) { ch ->
                     ChannelRow(
-                        name = name,
-                        onDelete = { pendingDelete = name }
+                        channel = ch,
+                        onDelete = { pendingDelete = ch }
                     )
                 }
             }
@@ -184,19 +225,29 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
             title = { Text("Remove channel?") },
             text = {
                 Text(
-                    "“$target” will no longer be on the allow-list. " +
+                    "“${target.label}” will no longer be on the allow-list. " +
                         "Videos from this channel will be blocked again."
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    viewModel.remove(target); pendingDelete = null
+                    viewModel.remove(target.originalInput)
+                    pendingDelete = null
                 }) { Text("Remove") }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
             }
         )
+    }
+}
+
+private fun isOnAllowList(detectedName: String, channels: List<AllowedChannel>): Boolean {
+    val needle = AllowListMatcher.normalize(detectedName) ?: return false
+    return channels.any { ch ->
+        AllowListMatcher.normalize(ch.originalInput) == needle ||
+            AllowListMatcher.normalize(ch.displayName) == needle ||
+            AllowListMatcher.normalize(ch.handle) == needle
     }
 }
 
@@ -327,16 +378,12 @@ private fun PermissionLine(
                     FilledTonalButton(
                         onClick = onCta,
                         modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(ctaLabel)
-                    }
+                    ) { Text(ctaLabel) }
                 } else {
                     OutlinedButton(
                         onClick = onCta,
                         modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(ctaLabel)
-                    }
+                    ) { Text(ctaLabel) }
                 }
             }
         }
@@ -345,7 +392,7 @@ private fun PermissionLine(
 
 @Composable
 private fun StatusPill(granted: Boolean) {
-    val (label, container, onContainer, icon) = if (granted) {
+    val tokens = if (granted) {
         StatusPillTokens(
             label = "Granted",
             container = MaterialTheme.colorScheme.primaryContainer,
@@ -361,7 +408,7 @@ private fun StatusPill(granted: Boolean) {
         )
     }
     Surface(
-        color = container,
+        color = tokens.container,
         shape = MaterialTheme.shapes.small
     ) {
         Row(
@@ -369,16 +416,16 @@ private fun StatusPill(granted: Boolean) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                icon,
+                tokens.icon,
                 contentDescription = null,
-                tint = onContainer,
+                tint = tokens.onContainer,
                 modifier = Modifier.size(14.dp)
             )
             Spacer(Modifier.width(4.dp))
             Text(
-                label,
+                tokens.label,
                 style = MaterialTheme.typography.labelSmall,
-                color = onContainer
+                color = tokens.onContainer
             )
         }
     }
@@ -392,12 +439,17 @@ private data class StatusPillTokens(
 )
 
 @Composable
-private fun GuardStatusBanner(channelCount: Int) {
-    val (title, body) = if (channelCount == 0) {
-        "Guard is inactive" to "Add at least one channel below to start enforcing."
-    } else {
-        "Guard active" to "Watching YouTube. " +
-            "$channelCount channel${if (channelCount == 1) "" else "s"} on the allow-list."
+private fun GuardStatusBanner(channelCount: Int, hasApiKey: Boolean) {
+    val (title, body) = when {
+        channelCount == 0 ->
+            "Guard is inactive" to "Add at least one channel below to start enforcing."
+        !hasApiKey ->
+            "Guard active (limited)" to "Watching YouTube. " +
+                "$channelCount channel${if (channelCount == 1) "" else "s"} on the " +
+                "allow-list. Add an API key to populate the Feed tab."
+        else ->
+            "Guard active" to "Watching YouTube. " +
+                "$channelCount channel${if (channelCount == 1) "" else "s"} on the allow-list."
     }
     val container = if (channelCount == 0)
         MaterialTheme.colorScheme.surfaceVariant
@@ -450,6 +502,7 @@ private fun GuardStatusBanner(channelCount: Int) {
 private fun LastDetectedCard(
     detectedName: String?,
     alreadyAllowed: Boolean,
+    isResolving: Boolean,
     onApprove: (String) -> Unit
 ) {
     Card(
@@ -516,13 +569,21 @@ private fun LastDetectedCard(
                     )
                 } else {
                     FilledTonalButton(
-                        onClick = { onApprove(detectedName) }
+                        onClick = { onApprove(detectedName) },
+                        enabled = !isResolving
                     ) {
-                        Icon(
-                            Icons.AutoMirrored.Outlined.PlaylistAdd,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
+                        if (isResolving) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                Icons.AutoMirrored.Outlined.PlaylistAdd,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                         Spacer(Modifier.width(8.dp))
                         Text("Allow this channel")
                     }
@@ -572,7 +633,10 @@ private fun SectionHeader(title: String, counter: String? = null) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddChannelRow(onAdd: (String) -> Unit) {
+private fun AddChannelRow(
+    isResolving: Boolean,
+    onAdd: (String) -> Unit
+) {
     var input by remember { mutableStateOf("") }
     val keyboard = LocalSoftwareKeyboardController.current
 
@@ -593,7 +657,7 @@ private fun AddChannelRow(onAdd: (String) -> Unit) {
             value = input,
             onValueChange = { input = it },
             label = { Text("Add channel") },
-            placeholder = { Text("MrBeast") },
+            placeholder = { Text("@MrBeast") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit() }),
@@ -609,9 +673,17 @@ private fun AddChannelRow(onAdd: (String) -> Unit) {
         Spacer(Modifier.width(12.dp))
         FilledIconButton(
             onClick = { submit() },
+            enabled = !isResolving,
             modifier = Modifier.size(56.dp)
         ) {
-            Icon(Icons.Outlined.Add, contentDescription = "Add channel")
+            if (isResolving) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+            } else {
+                Icon(Icons.Outlined.Add, contentDescription = "Add channel")
+            }
         }
     }
 }
@@ -621,7 +693,7 @@ private fun AddChannelRow(onAdd: (String) -> Unit) {
 // -------------------------------------------------------------------
 
 @Composable
-private fun ChannelRow(name: String, onDelete: () -> Unit) {
+private fun ChannelRow(channel: AllowedChannel, onDelete: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -634,20 +706,38 @@ private fun ChannelRow(name: String, onDelete: () -> Unit) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ChannelAvatar(name = name)
+            ChannelAvatar(channel = channel)
             Spacer(Modifier.width(12.dp))
-            Text(
-                name,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    channel.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (channel.handle.isNotBlank() &&
+                    !channel.handle.equals(channel.label, ignoreCase = true)
+                ) {
+                    Text(
+                        channel.handle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (!channel.isResolved) {
+                    Text(
+                        "Not resolved yet",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Outlined.DeleteOutline,
-                    contentDescription = "Remove $name",
+                    contentDescription = "Remove ${channel.label}",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -656,8 +746,8 @@ private fun ChannelRow(name: String, onDelete: () -> Unit) {
 }
 
 @Composable
-private fun ChannelAvatar(name: String) {
-    val initial = name.trim()
+private fun ChannelAvatar(channel: AllowedChannel) {
+    val initial = channel.label.trim()
         .removePrefix("@")
         .firstOrNull()
         ?.uppercaseChar()
@@ -667,13 +757,21 @@ private fun ChannelAvatar(name: String) {
         shape = CircleShape,
         modifier = Modifier.size(40.dp)
     ) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(
-                initial,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                fontWeight = FontWeight.SemiBold
+        if (channel.avatarUrl.isNotBlank()) {
+            AsyncImage(
+                model = channel.avatarUrl,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize()
             )
+        } else {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    initial,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
     }
 }

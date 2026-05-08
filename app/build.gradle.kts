@@ -1,6 +1,22 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
+}
+
+val youtubeApiKey: String = run {
+    val props = Properties()
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { props.load(it) }
+    }
+    // Fall back to gradle property or env var if local.properties doesn't have it.
+    props.getProperty("youtube.api.key")
+        ?: (project.findProperty("youtube.api.key") as String?)
+        ?: System.getenv("YOUTUBE_API_KEY")
+        ?: ""
 }
 
 android {
@@ -13,6 +29,12 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        buildConfigField(
+            "String",
+            "YOUTUBE_API_KEY",
+            "\"" + youtubeApiKey.replace("\"", "\\\"") + "\""
+        )
     }
 
     buildTypes {
@@ -36,6 +58,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -64,6 +87,14 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Networking + JSON for the YouTube Data API client.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+
+    // Image loading (channel avatars, video thumbnails).
+    implementation("io.coil-kt:coil-compose:2.6.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

@@ -83,7 +83,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         collectorJob = scope.launch {
-            allowList.allowedChannels.collect { allowListState.value = it }
+            allowList.allowedNames.collect { allowListState.value = it }
         }
         startService(Intent(this, GuardForegroundService::class.java))
         Log.i(TAG, "Accessibility service connected")
@@ -170,7 +170,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
     }
 
     private fun approveChannel(channelName: String) {
-        scope.launch { allowList.add(channelName) }
+        scope.launch { allowList.addRaw(channelName) }
         overlayUp = false
         // Extend cooldown so we don't re-block before they hit play again.
         lastBlockAt = SystemClock.uptimeMillis()
