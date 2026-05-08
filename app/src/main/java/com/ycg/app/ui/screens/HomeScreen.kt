@@ -2,6 +2,7 @@ package com.ycg.app.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.text.TextUtils
@@ -30,6 +31,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -53,6 +55,7 @@ import com.ycg.app.ui.HomeViewModel
 fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
     val context = LocalContext.current
     val channels by viewModel.channels.collectAsState()
+    val lastDetected by viewModel.lastDetected.collectAsState()
     var newChannel by remember { mutableStateOf("") }
 
     var accessibilityEnabled by remember {
@@ -61,14 +64,17 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
     var notificationsEnabled by remember {
         mutableStateOf(areNotificationsEnabled(context))
     }
+    var overlayEnabled by remember {
+        mutableStateOf(Settings.canDrawOverlays(context))
+    }
 
-    // Re-check permissions whenever the user comes back from Settings.
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 accessibilityEnabled = isAccessibilityEnabled(context)
                 notificationsEnabled = areNotificationsEnabled(context)
+                overlayEnabled = Settings.canDrawOverlays(context)
             }
         }
         owner.lifecycle.addObserver(observer)
@@ -87,6 +93,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
         ) {
             StatusCard(
                 accessibilityEnabled = accessibilityEnabled,
+                overlayEnabled = overlayEnabled,
                 notificationsEnabled = notificationsEnabled,
                 onOpenAccessibility = {
                     context.startActivity(
@@ -94,14 +101,33 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                 },
+                onOpenOverlay = {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:" + context.packageName)
+                        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                },
                 onOpenAppDetails = {
                     context.startActivity(
                         Intent(
                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            android.net.Uri.parse("package:" + context.packageName)
+                            Uri.parse("package:" + context.packageName)
                         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                 }
+            )
+
+            LastDetectedCard(
+                lastDetected = lastDetected?.name,
+                alreadyAllowed = lastDetected?.let { ld ->
+                    channels.any {
+                        com.ycg.app.data.AllowListMatcher.normalize(it) ==
+                            com.ycg.app.data.AllowListMatcher.normalize(ld.name)
+                    }
+                } ?: false,
+                onApprove = { name -> viewModel.add(name) }
             )
 
             Text("Allowed channels", style = MaterialTheme.typography.titleMedium)
@@ -153,8 +179,10 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
 @Composable
 private fun StatusCard(
     accessibilityEnabled: Boolean,
+    overlayEnabled: Boolean,
     notificationsEnabled: Boolean,
     onOpenAccessibility: () -> Unit,
+    onOpenOverlay: () -> Unit,
     onOpenAppDetails: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -164,10 +192,12 @@ private fun StatusCard(
         ) {
             Text("Status", style = MaterialTheme.typography.titleMedium)
             StatusLine("Accessibility access", accessibilityEnabled)
+            StatusLine("Display over other apps", overlayEnabled)
             StatusLine("Notifications", notificationsEnabled)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onOpenAccessibility) { Text("Accessibility settings") }
-                OutlinedButton(onClick = onOpenAppDetails) { Text("App settings") }
+                OutlinedButton(onClick = onOpenAccessibility) { Text("Accessibility") }
+                OutlinedButton(onClick = onOpenOverlay) { Text("Overlay") }
+                OutlinedButton(onClick = onOpenAppDetails) { Text("App") }
             }
             if (!accessibilityEnabled) {
                 Text(
@@ -175,6 +205,55 @@ private fun StatusCard(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall
                 )
+            }
+            if (!overlayEnabled) {
+                Text(
+                    "Without overlay permission the small banner can't be shown — " +
+                        "the guard will fall back to a full-screen block screen.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LastDetectedCard(
+    lastDetected: String?,
+    alreadyAllowed: Boolean,
+    onApprove: (String) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text("Last seen channel", style = MaterialTheme.typography.titleMedium)
+            if (lastDetected.isNullOrBlank()) {
+                Text(
+                    "Open a YouTube video and come back — the channel name " +
+                        "the guard sees will appear here.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        lastDetected,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (alreadyAllowed) {
+                        Text(
+                            "Already allowed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        TextButton(onClick = { onApprove(lastDetected) }) {
+                            Text("Allow")
+                        }
+                    }
+                }
             }
         }
     }
@@ -209,10 +288,6 @@ private fun ChannelRow(name: String, onDelete: () -> Unit) {
         }
     }
 }
-
-// -------------------------------------------------------------------
-// Permission probes.
-// -------------------------------------------------------------------
 
 private fun isAccessibilityEnabled(context: Context): Boolean {
     val expected = context.packageName +

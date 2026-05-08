@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ycg.app.data.AllowListRepository
+import com.ycg.app.data.LastDetected
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -17,6 +18,12 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
         initialValue = emptySet()
+    )
+
+    val lastDetected: StateFlow<LastDetected?> = repo.lastDetected.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = null
     )
 
     fun add(name: String) {

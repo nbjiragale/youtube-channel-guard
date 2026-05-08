@@ -7,12 +7,14 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.ycg.app.data.AllowListMatcher
 import com.ycg.app.data.AllowListRepository
+import com.ycg.app.overlay.SmallBlockOverlay
 import com.ycg.app.ui.BlockedActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,28 +27,21 @@ import kotlinx.coroutines.launch
  * visible video is from an allow-listed channel, and if not:
  *   1. Dispatches `KEYCODE_MEDIA_PAUSE` to the active media session so audio
  *      stops *immediately*.
- *   2. Launches [BlockedActivity] which becomes the foreground task and
- *      forces YouTube into the background — this is what stops the player UI
- *      and prevents the "playing behind the overlay" problem.
+ *   2. Shows a small "Blocked: <channel>" overlay banner near the top of
+ *      the screen with a one-tap "Allow" button.
+ *   3. Performs `GLOBAL_ACTION_BACK` to leave the watch page, then attempts
+ *      to dismiss the YouTube mini-player by clicking its close button —
+ *      so only the disallowed video closes, not YouTube itself.
  *
- * Detection strategy
- * ------------------
- * Channel detection is the hardest part because YouTube's release APK uses
- * obfuscated resource IDs and its tree is huge. We use a small set of robust,
- * production-tested signals in priority order:
+ * If the user has not granted SYSTEM_ALERT_WINDOW (so we can't show the
+ * banner overlay), we fall back to the older [BlockedActivity] flow which
+ * does not need that permission.
  *
- *   1. **Subscribe button.** On the watch page YouTube's Subscribe / Subscribed
- *      button is always present and its `contentDescription` is literally of
- *      the form "Subscribe to <ChannelName>" / "Subscribed to <ChannelName>".
- *      This is by far the most reliable per-video channel signal.
- *
- *   2. **Shorts handle.** When the visible UI is a Short (we detect this by
- *      the presence of well-known Shorts-only labels such as the "Shorts"
- *      navigation pip or "Remix" action), we look for the topmost clickable
- *      node whose text starts with "@" — that's the Short's creator handle.
- *
- * If neither signal fires we **fail open** (treat as allowed) rather than
- * risk false-blocking on an arbitrary `@username` from a comment.
+ * Detection
+ * ---------
+ * Channel detection lives in [ChannelDetector]. It's intentionally
+ * conservative — if it cannot identify the channel of the currently playing
+ * video with high confidence, it returns null and we fail open.
  */
 class YouTubeAccessibilityService : AccessibilityService() {
 
@@ -54,11 +49,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
         private const val TAG = "YTGuard"
         private const val YT_PACKAGE = "com.google.android.youtube"
 
-        /** Don't re-evaluate / re-block more often than this. */
         private const val MIN_EVAL_INTERVAL_MS = 600L
-
-        /** After we trigger a block, ignore further events for this long so we
-         *  don't relaunch BlockedActivity in a loop while it's coming up. */
         private const val POST_BLOCK_COOLDOWN_MS = 2_500L
 
         @Volatile
@@ -70,6 +61,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO)
     private lateinit var allowList: AllowListRepository
+    private lateinit var overlay: SmallBlockOverlay
     private val allowListState = MutableStateFlow<Set<String>>(emptySet())
     private var collectorJob: Job? = null
 
@@ -80,6 +72,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         allowList = AllowListRepository(applicationContext)
+        overlay = SmallBlockOverlay(applicationContext)
     }
 
     override fun onServiceConnected() {
@@ -88,7 +81,6 @@ class YouTubeAccessibilityService : AccessibilityService() {
         collectorJob = scope.launch {
             allowList.allowedChannels.collect { allowListState.value = it }
         }
-        // Optional persistent notification.
         startService(Intent(this, GuardForegroundService::class.java))
         Log.i(TAG, "Accessibility service connected")
     }
@@ -100,6 +92,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
         val now = SystemClock.uptimeMillis()
         if (now - lastBlockAt < POST_BLOCK_COOLDOWN_MS) return
         if (now - lastEvalAt < MIN_EVAL_INTERVAL_MS) return
+
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
@@ -115,6 +108,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         collectorJob?.cancel()
+        overlay.hide()
         super.onDestroy()
     }
 
@@ -126,16 +120,17 @@ class YouTubeAccessibilityService : AccessibilityService() {
         val root: AccessibilityNodeInfo = rootInActiveWindow ?: return
         val detected = ChannelDetector.detect(root)
         if (detected == null) {
-            // Don't know what we're looking at — explicitly allow. Better to
-            // under-enforce on home/search/library pages than to false-block.
+            // Don't know what we're looking at → fail open.
             lastDecisionChannel = null
             return
         }
 
-        // Re-blocking the same channel within the cooldown window is already
-        // suppressed above; this is just an info log.
         if (detected != lastDecisionChannel) {
             Log.i(TAG, "Detected channel='$detected'")
+            // Persist for the home screen "last seen" UX.
+            scope.launch {
+                allowList.setLastDetected(detected, System.currentTimeMillis())
+            }
         }
         lastDecisionChannel = detected
 
@@ -148,14 +143,36 @@ class YouTubeAccessibilityService : AccessibilityService() {
         lastBlockAt = SystemClock.uptimeMillis()
         Log.i(TAG, "Blocking channel='$channelName'")
 
-        // 1. Pause audio first so the user doesn't hear a half-second of the
-        //    disallowed video while BlockedActivity is being created.
+        // 1. Cut audio immediately.
         sendMediaPause()
 
-        // 2. Launch our blocking screen on top of YouTube. Becoming the
-        //    foreground task is what actually backgrounds YouTube and stops
-        //    the player UI — the overlay-on-top approach we used before could
-        //    not do that.
+        // 2. Show the small overlay if we have permission; otherwise fall
+        //    back to the full-screen blocked-activity flow.
+        val hasOverlay = Settings.canDrawOverlays(applicationContext)
+        val attached = if (hasOverlay) {
+            overlay.show(channelName) { name -> approveChannel(name) }
+        } else {
+            false
+        }
+
+        if (!attached) {
+            launchFullScreenFallback(channelName)
+            return
+        }
+
+        // 3. Close just the disallowed video — not YouTube.
+        //    Press BACK once: from a watch page this minimises into the
+        //    mini-player. Then a moment later try to find and dismiss the
+        //    mini-player so the player goes away entirely. If we're not on
+        //    a watch page (e.g. Shorts), the mini-player simply isn't there
+        //    and the close-attempt is a harmless no-op.
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        main.postDelayed({ closeMiniPlayerIfAny() }, 350)
+        main.postDelayed({ sendMediaPause() }, 600)
+        main.postDelayed({ closeMiniPlayerIfAny() }, 1_200)
+    }
+
+    private fun launchFullScreenFallback(channelName: String) {
         val intent = Intent(this, BlockedActivity::class.java)
             .putExtra(BlockedActivity.EXTRA_CHANNEL, channelName)
             .addFlags(
@@ -165,11 +182,19 @@ class YouTubeAccessibilityService : AccessibilityService() {
                     Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
             )
         startActivity(intent)
-
-        // 3. Belt-and-suspenders: a moment later, send another pause in case
-        //    YouTube grabbed audio focus back during the activity transition.
-        main.postDelayed({ sendMediaPause() }, 400)
     }
+
+    private fun approveChannel(channelName: String) {
+        scope.launch { allowList.add(channelName) }
+        // We just allow-listed it, so don't keep blocking the same video
+        // during the cooldown window — extend the cooldown so the user can
+        // reopen the video without flicker.
+        lastBlockAt = SystemClock.uptimeMillis()
+    }
+
+    // --------------------------------------------------------------------
+    // YouTube manipulation helpers.
+    // --------------------------------------------------------------------
 
     private fun sendMediaPause() {
         val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
@@ -181,5 +206,43 @@ class YouTubeAccessibilityService : AccessibilityService() {
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to dispatch media pause", t)
         }
+    }
+
+    /**
+     * After pressing BACK on a watch page, YouTube collapses the player into
+     * a mini-player at the bottom of the screen. We try to find its close
+     * button and click it so the disallowed video stops entirely without
+     * forcing the user out of YouTube.
+     *
+     * If no mini-player is present this is a harmless no-op.
+     */
+    private fun closeMiniPlayerIfAny() {
+        val root = rootInActiveWindow ?: return
+        val candidate = findClickableByContentDescription(root) { desc ->
+            desc.equals("Close", ignoreCase = true) ||
+                desc.contains("Close player", ignoreCase = true) ||
+                desc.contains("Dismiss", ignoreCase = true)
+        }
+        if (candidate != null) {
+            try {
+                candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                Log.i(TAG, "Mini-player close clicked")
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to click mini-player close", t)
+            }
+        }
+    }
+
+    private fun findClickableByContentDescription(
+        node: AccessibilityNodeInfo,
+        match: (String) -> Boolean
+    ): AccessibilityNodeInfo? {
+        val cd = node.contentDescription?.toString()
+        if (!cd.isNullOrEmpty() && node.isClickable && match(cd)) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            findClickableByContentDescription(child, match)?.let { return it }
+        }
+        return null
     }
 }
