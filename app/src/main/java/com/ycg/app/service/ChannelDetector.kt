@@ -39,6 +39,13 @@ object ChannelDetector {
         return null
     }
 
+    /**
+     * True when the visible accessibility tree appears to be the Shorts
+     * player. Used by the service for the "block all Shorts" rule, so we
+     * can short-circuit before any channel-name extraction.
+     */
+    fun isShorts(root: AccessibilityNodeInfo): Boolean = looksLikeShorts(root)
+
     // -------------------------------------------------------------------
     // Watch page.
     // -------------------------------------------------------------------

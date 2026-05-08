@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.ycg.app.data.LockdownEngine
 import com.ycg.app.data.LockdownRepository
 import com.ycg.app.data.LockdownWindow
+import com.ycg.app.data.RestrictionsRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -18,11 +19,18 @@ import java.time.LocalDateTime
 class LockdownViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = LockdownRepository(app)
+    private val restrictions = RestrictionsRepository(app)
 
     val windows: StateFlow<List<LockdownWindow>> = repo.windows.stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
         initialValue = emptyList()
+    )
+
+    val blockShorts: StateFlow<Boolean> = restrictions.blockShorts.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = false
     )
 
     /**
@@ -49,6 +57,10 @@ class LockdownViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setEnabled(id: String, enabled: Boolean) {
         viewModelScope.launch { repo.setEnabled(id, enabled) }
+    }
+
+    fun setBlockShorts(enabled: Boolean) {
+        viewModelScope.launch { restrictions.setBlockShorts(enabled) }
     }
 
     private fun ticker(periodMs: Long) = flow {

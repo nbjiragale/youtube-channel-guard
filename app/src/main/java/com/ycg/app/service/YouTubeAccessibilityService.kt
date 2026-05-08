@@ -18,6 +18,7 @@ import com.ycg.app.data.AllowListRepository
 import com.ycg.app.data.LockdownEngine
 import com.ycg.app.data.LockdownRepository
 import com.ycg.app.data.LockdownWindow
+import com.ycg.app.data.RestrictionsRepository
 import com.ycg.app.overlay.SmallBlockOverlay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,11 +74,14 @@ class YouTubeAccessibilityService : AccessibilityService() {
     private val scope = CoroutineScope(Dispatchers.IO)
     private lateinit var allowList: AllowListRepository
     private lateinit var lockdown: LockdownRepository
+    private lateinit var restrictions: RestrictionsRepository
     private lateinit var overlay: SmallBlockOverlay
     private val allowListState = MutableStateFlow<Set<String>>(emptySet())
     private val lockdownState = MutableStateFlow<List<LockdownWindow>>(emptyList())
+    private val blockShortsState = MutableStateFlow(false)
     private var collectorJob: Job? = null
     private var lockdownCollectorJob: Job? = null
+    private var restrictionsCollectorJob: Job? = null
 
     private var lastEvalAt = 0L
     private var lastBlockAt = 0L
@@ -88,6 +92,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
         super.onCreate()
         allowList = AllowListRepository(applicationContext)
         lockdown = LockdownRepository(applicationContext)
+        restrictions = RestrictionsRepository(applicationContext)
         overlay = SmallBlockOverlay(applicationContext)
     }
 
@@ -99,6 +104,9 @@ class YouTubeAccessibilityService : AccessibilityService() {
         }
         lockdownCollectorJob = scope.launch {
             lockdown.windows.collect { lockdownState.value = it }
+        }
+        restrictionsCollectorJob = scope.launch {
+            restrictions.blockShorts.collect { blockShortsState.value = it }
         }
         startService(Intent(this, GuardForegroundService::class.java))
         Log.i(TAG, "Accessibility service connected")
@@ -130,6 +138,7 @@ class YouTubeAccessibilityService : AccessibilityService() {
         instance = null
         collectorJob?.cancel()
         lockdownCollectorJob?.cancel()
+        restrictionsCollectorJob?.cancel()
         overlay.hide()
         overlayUp = false
         super.onDestroy()
@@ -141,6 +150,15 @@ class YouTubeAccessibilityService : AccessibilityService() {
 
     private fun evaluateCurrentWindow() {
         val root: AccessibilityNodeInfo = rootInActiveWindow ?: return
+
+        // Block-Shorts rule runs first and short-circuits everything else.
+        // Detection is structural (Shorts-specific buttons in the tree) so
+        // we don't need to know the channel at all to decide here.
+        if (blockShortsState.value && ChannelDetector.isShorts(root)) {
+            triggerShortsBlock()
+            return
+        }
+
         val detected = ChannelDetector.detect(root)
         if (detected == null) {
             lastDecisionChannel = null
@@ -167,6 +185,29 @@ class YouTubeAccessibilityService : AccessibilityService() {
         if (AllowListMatcher.isAllowed(detected, allowListState.value)) return
 
         triggerBlock(detected)
+    }
+
+    private fun triggerShortsBlock() {
+        lastBlockAt = SystemClock.uptimeMillis()
+        Log.i(TAG, "Shorts blocked")
+
+        sendMediaPause()
+
+        val canOverlay = Settings.canDrawOverlays(applicationContext)
+        if (canOverlay) {
+            val attached = overlay.showLockdown(
+                title = "Shorts are blocked",
+                subtitle = "Tap OK to close",
+                onOk = { closeDisallowedVideo() }
+            )
+            if (attached) {
+                overlayUp = true
+                return
+            }
+        }
+
+        showToast("Shorts are blocked")
+        closeDisallowedVideo()
     }
 
     private fun triggerLockdownBlock(window: LockdownWindow) {

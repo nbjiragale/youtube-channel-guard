@@ -67,6 +67,7 @@ import java.time.format.DateTimeFormatter
 fun LockdownScreen(viewModel: LockdownViewModel = viewModel()) {
     val windows by viewModel.windows.collectAsState()
     val active by viewModel.activeWindow.collectAsState()
+    val blockShorts by viewModel.blockShorts.collectAsState()
 
     var editorOpen by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<LockdownWindow?>(null) }
@@ -102,8 +103,14 @@ fun LockdownScreen(viewModel: LockdownViewModel = viewModel()) {
                 ActiveBanner(active)
             }
             item {
+                BlockShortsCard(
+                    enabled = blockShorts,
+                    onToggle = { viewModel.setBlockShorts(it) }
+                )
+            }
+            item {
                 Text(
-                    "Windows",
+                    "Time windows",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp, top = 4.dp)
@@ -208,6 +215,43 @@ private fun ActiveBanner(active: LockdownWindow?) {
                     color = onContainer
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun BlockShortsCard(enabled: Boolean, onToggle: (Boolean) -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Block Shorts entirely",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Every YouTube Short is blocked, regardless of channel.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle
+            )
         }
     }
 }
