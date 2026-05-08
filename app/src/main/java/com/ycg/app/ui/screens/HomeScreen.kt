@@ -7,9 +7,6 @@ import android.os.Build
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.accessibility.AccessibilityManager
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.outlined.Accessibility
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -36,25 +34,21 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Notifications
-import androidx.compose.material.icons.automirrored.outlined.PlaylistAdd
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -70,13 +64,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -89,7 +83,8 @@ private data class PermissionState(
     val overlay: Boolean,
     val notifications: Boolean
 ) {
-    val allGranted: Boolean get() = accessibility && overlay && notifications
+    val allGranted: Boolean
+        get() = accessibility && overlay && notifications
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -99,9 +94,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
     val channels by viewModel.channels.collectAsState()
     val lastDetected by viewModel.lastDetected.collectAsState()
 
-    var permissions by remember {
-        mutableStateOf(readPermissionState(context))
-    }
+    var permissions by remember { mutableStateOf(readPermissionState(context)) }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -114,22 +107,13 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
     }
 
     var pendingDelete by remember { mutableStateOf<String?>(null) }
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
             CenterAlignedTopAppBar(
-                title = {
-                    Text(
-                        "Channel Guard",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                ),
-                scrollBehavior = scrollBehavior
+                title = { Text("Channel Guard") },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors()
             )
         }
     ) { padding ->
@@ -137,31 +121,22 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(
+                start = 16.dp, end = 16.dp,
+                top = 12.dp, bottom = 32.dp
+            ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
-                AnimatedVisibility(
-                    visible = !permissions.allGranted,
-                    enter = fadeIn(),
-                    exit = fadeOut()
-                ) {
+                if (permissions.allGranted) {
+                    GuardStatusBanner(channelCount = channels.size)
+                } else {
                     SetupCard(
                         permissions = permissions,
                         onOpenAccessibility = { openAccessibility(context) },
                         onOpenOverlay = { openOverlaySettings(context) },
                         onOpenAppDetails = { openAppDetails(context) }
                     )
-                }
-            }
-
-            item {
-                AnimatedVisibility(
-                    visible = permissions.allGranted,
-                    enter = fadeIn(),
-                    exit = fadeOut()
-                ) {
-                    GuardActiveBanner(channelCount = channels.size)
                 }
             }
 
@@ -199,8 +174,6 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
                     )
                 }
             }
-
-            item { Spacer(Modifier.height(24.dp)) }
         }
     }
 
@@ -238,8 +211,18 @@ private fun SetupCard(
     onOpenOverlay: () -> Unit,
     onOpenAppDetails: () -> Unit
 ) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(20.dp)) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Outlined.Shield,
@@ -249,17 +232,16 @@ private fun SetupCard(
                 Spacer(Modifier.width(12.dp))
                 Text(
                     "Setup needed",
-                    style = MaterialTheme.typography.titleMedium
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
-            Spacer(Modifier.height(4.dp))
             Text(
-                "Grant the permissions below so Channel Guard can " +
-                    "watch YouTube and block disallowed videos.",
+                "Grant the permissions below so Channel Guard can watch " +
+                    "YouTube and block disallowed videos.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(Modifier.height(16.dp))
 
             PermissionLine(
                 icon = Icons.Outlined.Accessibility,
@@ -270,7 +252,6 @@ private fun SetupCard(
                 onCta = onOpenAccessibility,
                 emphasis = !permissions.accessibility
             )
-            HorizontalDivider(Modifier.padding(vertical = 12.dp))
             PermissionLine(
                 icon = Icons.Outlined.Layers,
                 label = "Display over other apps",
@@ -280,7 +261,6 @@ private fun SetupCard(
                 onCta = onOpenOverlay,
                 emphasis = !permissions.overlay
             )
-            HorizontalDivider(Modifier.padding(vertical = 12.dp))
             PermissionLine(
                 icon = Icons.Outlined.Notifications,
                 label = "Notifications",
@@ -304,21 +284,35 @@ private fun PermissionLine(
     onCta: () -> Unit,
     emphasis: Boolean
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = if (granted) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(28.dp)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
         )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = if (granted)
+                        MaterialTheme.colorScheme.primary
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(12.dp))
                 Text(
                     label,
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(8.dp))
                 StatusPill(granted = granted)
@@ -328,61 +322,77 @@ private fun PermissionLine(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }
-        Spacer(Modifier.width(8.dp))
-        if (granted) {
-            // No CTA — already done.
-        } else if (emphasis) {
-            FilledTonalButton(onClick = onCta) { Text(ctaLabel) }
-        } else {
-            OutlinedButton(onClick = onCta) { Text(ctaLabel) }
+            if (!granted) {
+                if (emphasis) {
+                    FilledTonalButton(
+                        onClick = onCta,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(ctaLabel)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onCta,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(ctaLabel)
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
 private fun StatusPill(granted: Boolean) {
-    if (granted) {
-        AssistChip(
-            onClick = {},
-            enabled = false,
-            label = { Text("Granted") },
-            leadingIcon = {
-                Icon(
-                    Icons.Outlined.CheckCircle,
-                    contentDescription = null,
-                    modifier = Modifier.size(AssistChipDefaults.IconSize)
-                )
-            },
-            colors = AssistChipDefaults.assistChipColors(
-                disabledContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                disabledLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                disabledLeadingIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-            )
+    val (label, container, onContainer, icon) = if (granted) {
+        StatusPillTokens(
+            label = "Granted",
+            container = MaterialTheme.colorScheme.primaryContainer,
+            onContainer = MaterialTheme.colorScheme.onPrimaryContainer,
+            icon = Icons.Outlined.CheckCircle
         )
     } else {
-        AssistChip(
-            onClick = {},
-            enabled = false,
-            label = { Text("Action needed") },
-            leadingIcon = {
-                Icon(
-                    Icons.Outlined.ErrorOutline,
-                    contentDescription = null,
-                    modifier = Modifier.size(AssistChipDefaults.IconSize)
-                )
-            },
-            colors = AssistChipDefaults.assistChipColors(
-                disabledContainerColor = MaterialTheme.colorScheme.errorContainer,
-                disabledLabelColor = MaterialTheme.colorScheme.onErrorContainer,
-                disabledLeadingIconContentColor = MaterialTheme.colorScheme.onErrorContainer
-            )
+        StatusPillTokens(
+            label = "Action needed",
+            container = MaterialTheme.colorScheme.errorContainer,
+            onContainer = MaterialTheme.colorScheme.onErrorContainer,
+            icon = Icons.Outlined.ErrorOutline
         )
+    }
+    Surface(
+        color = container,
+        shape = MaterialTheme.shapes.small
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = onContainer,
+                modifier = Modifier.size(14.dp)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = onContainer
+            )
+        }
     }
 }
 
+private data class StatusPillTokens(
+    val label: String,
+    val container: androidx.compose.ui.graphics.Color,
+    val onContainer: androidx.compose.ui.graphics.Color,
+    val icon: ImageVector
+)
+
 @Composable
-private fun GuardActiveBanner(channelCount: Int) {
+private fun GuardStatusBanner(channelCount: Int) {
     val (title, body) = if (channelCount == 0) {
         "Guard is inactive" to "Add at least one channel below to start enforcing."
     } else {
@@ -398,13 +408,14 @@ private fun GuardActiveBanner(channelCount: Int) {
     else
         MaterialTheme.colorScheme.onPrimaryContainer
 
-    Surface(
-        color = container,
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = container)
     ) {
         Row(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
@@ -420,6 +431,7 @@ private fun GuardActiveBanner(channelCount: Int) {
                     style = MaterialTheme.typography.titleMedium,
                     color = onContainer
                 )
+                Spacer(Modifier.height(2.dp))
                 Text(
                     body,
                     style = MaterialTheme.typography.bodySmall,
@@ -440,19 +452,24 @@ private fun LastDetectedCard(
     alreadyAllowed: Boolean,
     onApprove: (String) -> Unit
 ) {
-    ElevatedCard(
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     Icons.Outlined.Visibility,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(18.dp)
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -461,7 +478,6 @@ private fun LastDetectedCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Spacer(Modifier.height(8.dp))
             if (detectedName.isNullOrBlank()) {
                 Text(
                     "No channel seen yet — open YouTube and play a video. " +
@@ -470,36 +486,45 @@ private fun LastDetectedCard(
                     color = MaterialTheme.colorScheme.onSurface
                 )
             } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        detectedName,
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (alreadyAllowed) {
-                        AssistChip(
-                            onClick = {},
-                            enabled = false,
-                            label = { Text("Allowed") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Outlined.CheckCircle,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(AssistChipDefaults.IconSize)
-                                )
-                            },
-                            colors = AssistChipDefaults.assistChipColors(
-                                disabledContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                disabledLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                disabledLeadingIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                Text(
+                    detectedName,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (alreadyAllowed) {
+                    AssistChip(
+                        onClick = {},
+                        enabled = false,
+                        label = { Text("Already allowed") },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Outlined.CheckCircle,
+                                contentDescription = null,
+                                modifier = Modifier.size(AssistChipDefaults.IconSize)
                             )
+                        },
+                        colors = AssistChipDefaults.assistChipColors(
+                            disabledContainerColor =
+                                MaterialTheme.colorScheme.primaryContainer,
+                            disabledLabelColor =
+                                MaterialTheme.colorScheme.onPrimaryContainer,
+                            disabledLeadingIconContentColor =
+                                MaterialTheme.colorScheme.onPrimaryContainer
                         )
-                    } else {
-                        FilledTonalButton(onClick = { onApprove(detectedName) }) {
-                            Icon(Icons.AutoMirrored.Outlined.PlaylistAdd, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Allow")
-                        }
+                    )
+                } else {
+                    FilledTonalButton(
+                        onClick = { onApprove(detectedName) }
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.PlaylistAdd,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Allow this channel")
                     }
                 }
             }
@@ -515,14 +540,16 @@ private fun LastDetectedCard(
 private fun SectionHeader(title: String, counter: String? = null) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 4.dp)
     ) {
         Text(
             title.uppercase(),
             style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
         )
-        Spacer(Modifier.weight(1f))
         if (counter != null) {
             Surface(
                 shape = CircleShape,
@@ -530,7 +557,7 @@ private fun SectionHeader(title: String, counter: String? = null) {
             ) {
                 Text(
                     counter,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
@@ -560,14 +587,13 @@ private fun AddChannelRow(onAdd: (String) -> Unit) {
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         OutlinedTextField(
             value = input,
             onValueChange = { input = it },
             label = { Text("Add channel") },
-            placeholder = { Text("e.g. MrBeast or @MrBeast") },
+            placeholder = { Text("MrBeast") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit() }),
@@ -580,12 +606,10 @@ private fun AddChannelRow(onAdd: (String) -> Unit) {
                 }
             }
         )
+        Spacer(Modifier.width(12.dp))
         FilledIconButton(
             onClick = { submit() },
-            modifier = Modifier.size(56.dp),
-            colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = MaterialTheme.colorScheme.primary
-            )
+            modifier = Modifier.size(56.dp)
         ) {
             Icon(Icons.Outlined.Add, contentDescription = "Add channel")
         }
@@ -598,7 +622,12 @@ private fun AddChannelRow(onAdd: (String) -> Unit) {
 
 @Composable
 private fun ChannelRow(name: String, onDelete: () -> Unit) {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -610,6 +639,9 @@ private fun ChannelRow(name: String, onDelete: () -> Unit) {
             Text(
                 name,
                 style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
             IconButton(onClick = onDelete) {
@@ -630,29 +662,30 @@ private fun ChannelAvatar(name: String) {
         .firstOrNull()
         ?.uppercaseChar()
         ?.toString().orEmpty()
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(CircleShape),
-        contentAlignment = Alignment.Center
+    Surface(
+        color = MaterialTheme.colorScheme.primaryContainer,
+        shape = CircleShape,
+        modifier = Modifier.size(40.dp)
     ) {
-        Surface(
-            color = MaterialTheme.colorScheme.primaryContainer,
-            shape = CircleShape,
-            modifier = Modifier.size(40.dp)
-        ) {}
-        Text(
-            initial,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
-            fontWeight = FontWeight.SemiBold
-        )
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                initial,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
     }
 }
 
 @Composable
 private fun ChannelsEmptyState() {
-    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -667,8 +700,9 @@ private fun ChannelsEmptyState() {
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                "Guard is inactive",
-                style = MaterialTheme.typography.titleMedium
+                "No channels yet",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(Modifier.height(4.dp))
             Text(
