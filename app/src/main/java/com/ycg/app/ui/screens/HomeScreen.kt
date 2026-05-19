@@ -181,6 +181,14 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
                 }
             }
 
+            if (permissions.allGranted) {
+                item {
+                    PauseForPaymentsCard(
+                        onOpenAccessibility = { openAccessibility(context) }
+                    )
+                }
+            }
+
             item {
                 LastDetectedCard(
                     detectedName = lastDetected?.name,
@@ -438,6 +446,55 @@ private data class StatusPillTokens(
     val onContainer: androidx.compose.ui.graphics.Color,
     val icon: ImageVector
 )
+
+@Composable
+private fun PauseForPaymentsCard(onOpenAccessibility: () -> Unit) {
+    // Payment apps (UPI, banking) refuse to launch while ANY non-system
+    // accessibility service with screen-read access is enabled. Android
+    // doesn't let us toggle our own service programmatically, so we surface
+    // a 1-tap deep-link to the system Accessibility settings.
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                Icons.Outlined.Accessibility,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Need to use a banking or UPI app?",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Payment apps refuse to launch while any accessibility " +
+                        "service is on. Pause Channel Guard from Settings, " +
+                        "then re-enable it after.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = onOpenAccessibility) {
+                    Text("Open Accessibility settings")
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun GuardStatusBanner(channelCount: Int, hasApiKey: Boolean) {
