@@ -25,6 +25,13 @@ object ChannelDetector {
     )
 
     fun detect(root: AccessibilityNodeInfo): String? {
+        // Bail out unless a video player is actually visible. Without this
+        // gate, any Subscribe button anywhere in the tree (feed video cards,
+        // community posts, channel chips on Home / Subscriptions / Search)
+        // would be treated as the currently-playing channel and trigger a
+        // false block.
+        if (!isPlayerOpen(root)) return null
+
         // 1. Watch page: the Subscribe button's contentDescription is the
         //    most reliable channel signal in the entire YouTube UI.
         watchPageChannelFromSubscribe(root)?.let { return it.normaliseWhitespace() }
@@ -61,15 +68,17 @@ object ChannelDetector {
             val cd = node.contentDescription?.toString()?.lowercase()
                 ?: return@treeContains false
             // Watch-page-specific signals; none of these are present on
-            // the Home / Subscriptions / Search feeds.
+            // the Home / Subscriptions / Search feeds. Deliberately *not*
+            // including Subscribe-button text here, because feed video
+            // cards and community posts carry inline Subscribe buttons of
+            // their own.
             cd.contains("like this video") ||
                 cd.contains("dislike this video") ||
                 cd.contains("expand the player") ||
                 cd.contains("collapse the player") ||
                 cd.contains("minimize the player") ||
                 cd.contains("minimize player") ||
-                cd.contains("expand description") ||
-                SUBSCRIBE_PREFIXES.any { p -> cd.startsWith(p.lowercase()) }
+                cd.contains("expand description")
         }
     }
 
